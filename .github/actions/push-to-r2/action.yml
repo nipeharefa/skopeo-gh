@@ -1,0 +1,58 @@
+name: Push OCI layout to R2
+description: |
+  Run copy-and-push-r2.sh in PUSH_ONLY mode.
+  Caller is responsible for producing the OCI layout (e.g. via
+  `docker buildx build --output type=oci,oci-layout=true,dest=...`) and for
+  supplying R2 credentials + bucket/endpoint via inputs/secrets.
+
+  No secrets or account-specific values are baked into this action.
+
+inputs:
+  image-name:
+    description: Target image name in registry (e.g. myapp)
+    required: true
+  oci-dir:
+    description: Local OCI layout directory containing index.json, oci-layout, blobs/
+    required: true
+  r2-bucket:
+    description: Cloudflare R2 bucket name
+    required: true
+  r2-endpoint:
+    description: Cloudflare R2 S3 endpoint URL (https://<account_id>.r2.cloudflarestorage.com)
+    required: true
+  aws-region:
+    description: AWS region for S3 API calls
+    required: false
+    default: auto
+
+runs:
+  using: composite
+  steps:
+    - name: Verify OCI layout
+      shell: bash
+      env:
+        OCI_DIR: ${{ inputs.oci-dir }}
+      run: |
+        set -euo pipefail
+        if [[ ! -f "${OCI_DIR}/index.json" ]] || [[ ! -f "${OCI_DIR}/oci-layout" ]]; then
+          echo "::error::OCI layout incomplete at ${OCI_DIR} (need index.json + oci-layout + blobs/)"
+          exit 1
+        fi
+        echo "Found OCI layout: $(jq '.manifests | length' "${OCI_DIR}/index.json") manifest(s)"
+
+    - name: Push to R2 (PUSH_ONLY)
+      shell: bash
+      env:
+        PUSH_ONLY: "1"
+        IMAGE_NAME: ${{ inputs.image-name }}
+        OCI_DIR: ${{ inputs.oci-dir }}
+        R2_BUCKET: ${{ inputs.r2-bucket }}
+        R2_ENDPOINT: ${{ inputs.r2-endpoint }}
+        AWS_DEFAULT_REGION: ${{ inputs.aws-region }}
+        AWS_ACCESS_KEY_ID: ${{ env.AWS_ACCESS_KEY_ID }}
+        AWS_SECRET_ACCESS_KEY: ${{ env.AWS_SECRET_ACCESS_KEY }}
+      run: |
+        set -euo pipefail
+        SCRIPT="${{ github.action_path }}/../../copy-and-push-r2.sh"
+        chmod +x "$SCRIPT"
+        "$SCRIPT"
