@@ -53,6 +53,6 @@ runs:
         AWS_SECRET_ACCESS_KEY: ${{ env.AWS_SECRET_ACCESS_KEY }}
       run: |
         set -euo pipefail
-        SCRIPT="${{ github.action_path }}/../../copy-and-push-r2.sh"
+        SCRIPT="${{ github.action_path }}/copy-and-push-r2.sh"
         chmod +x "$SCRIPT"
         "$SCRIPT"
