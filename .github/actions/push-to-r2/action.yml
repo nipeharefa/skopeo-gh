@@ -11,6 +11,13 @@ inputs:
   image-name:
     description: Target image name in registry (e.g. myapp)
     required: true
+  tags:
+    description: |
+      Space-separated tags to push under (e.g. "v1.2.3 latest").
+      When set, OVERRIDES ref annotations baked into the OCI layout
+      (useful for buildx outputs that have no refs). Leave empty to use the layout's refs.
+    required: false
+    default: ""
   oci-dir:
     description: Local OCI layout directory containing index.json, oci-layout, blobs/
     required: true
@@ -51,6 +58,7 @@ runs:
         AWS_DEFAULT_REGION: ${{ inputs.aws-region }}
         AWS_ACCESS_KEY_ID: ${{ env.AWS_ACCESS_KEY_ID }}
         AWS_SECRET_ACCESS_KEY: ${{ env.AWS_SECRET_ACCESS_KEY }}
+        PUSH_TAGS: ${{ inputs.tags }}
       run: |
         set -euo pipefail
         SCRIPT="${{ github.action_path }}/copy-and-push-r2.sh"

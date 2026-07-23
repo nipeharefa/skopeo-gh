@@ -50,6 +50,8 @@ Optional env:
   OS=linux                  override source OS (default: linux)
   SRC_NO_CREDS=1|0          set 0 to use ~/.docker/config.json auth (default: 1, for private registries like fly.io/gcr/ecr)
   AWS_DEFAULT_REGION        (default: auto)
+  PUSH_TAGS                 space-separated tags to publish under; overrides ref annotations
+                            baked into the OCI layout (handy for buildx outputs that lack refs)
 EOF
   exit 1
 }
@@ -63,6 +65,7 @@ PUSH_ONLY="${PUSH_ONLY:-}"
 SOURCE_TAGS="${SOURCE_TAGS:-}"
 TAG="${TAG:-}"
 SOURCE_IMAGE="${SOURCE_IMAGE:-}"
+PUSH_TAGS="${PUSH_TAGS:-}"
 
 if [[ -n "${COPY_ONLY}" && -n "${PUSH_ONLY}" ]]; then
   echo "❌ COPY_ONLY and PUSH_ONLY are mutually exclusive"
@@ -187,51 +190,74 @@ aws s3 cp \
 UPLOADED_DIGESTS=""
 TAGS_PUSHED=0
 DIGESTS_PUSHED=0
+PUSHED_TAGS_LIST=""
 
-while IFS= read -r entry; do
-  REF=$(jq -r '.annotations["org.opencontainers.image.ref.name"] // empty' <<<"${entry}")
-  DGST=$(jq -r '.digest' <<<"${entry}")
-  FILE="${OCI_DIR}/blobs/sha256/${DGST#sha256:}"
+upload_manifest() {
+  local file="$1" tag_or_digest="$2" ct="$3" label="$4"
+  echo "▶ Upload manifest ${label}: ${IMAGE_NAME}:${tag_or_digest}"
+  aws s3 cp "${file}" \
+    "s3://${R2_BUCKET}/v2/${IMAGE_NAME}/manifests/${tag_or_digest}" \
+    --endpoint-url "${R2_ENDPOINT}" \
+    --content-type "${ct}"
+}
 
-  if [[ ! -f "${FILE}" ]]; then
-    echo "❌ manifest blob not found: ${FILE}"
+if [[ -n "${PUSH_TAGS}" ]]; then
+  echo "▶ PUSH_TAGS override: ${PUSH_TAGS}"
+  PRIMARY_ENTRY=$(jq -c '.manifests[0]' "${OCI_DIR}/index.json")
+  PRIMARY_DGST=$(jq -r '.digest' <<<"${PRIMARY_ENTRY}")
+  PRIMARY_FILE="${OCI_DIR}/blobs/sha256/${PRIMARY_DGST#sha256:}"
+  if [[ ! -f "${PRIMARY_FILE}" ]]; then
+    echo "❌ primary manifest blob not found: ${PRIMARY_FILE}"
     exit 1
   fi
+  PRIMARY_MEDIA_TYPE=$(jq -r '.mediaType // empty' "${PRIMARY_FILE}")
+  PRIMARY_CT=$(detect_ct "${PRIMARY_MEDIA_TYPE}")
 
-  MEDIA_TYPE=$(jq -r '.mediaType // empty' "${FILE}")
-  CT=$(detect_ct "${MEDIA_TYPE}")
-
-  if [[ -n "${REF}" ]]; then
-    echo "▶ Upload manifest by tag: ${IMAGE_NAME}:${REF}  (${MEDIA_TYPE:-<none>})"
-    aws s3 cp \
-      "${FILE}" \
-      "s3://${R2_BUCKET}/v2/${IMAGE_NAME}/manifests/${REF}" \
-      --endpoint-url "${R2_ENDPOINT}" \
-      --content-type "${CT}"
+  for t in ${PUSH_TAGS}; do
+    upload_manifest "${PRIMARY_FILE}" "${t}" "${PRIMARY_CT}" "by tag (override)  (${PRIMARY_MEDIA_TYPE:-<none>})"
     TAGS_PUSHED=$((TAGS_PUSHED + 1))
-  fi
+    PUSHED_TAGS_LIST="${PUSHED_TAGS_LIST}${t} "
+  done
 
-  if [[ ",${UPLOADED_DIGESTS}," != *",${DGST},"* ]]; then
-    echo "▶ Upload manifest by digest: ${DGST}"
-    aws s3 cp \
-      "${FILE}" \
-      "s3://${R2_BUCKET}/v2/${IMAGE_NAME}/manifests/${DGST}" \
-      --endpoint-url "${R2_ENDPOINT}" \
-      --content-type "${CT}"
-    UPLOADED_DIGESTS="${UPLOADED_DIGESTS},${DGST}"
-    DIGESTS_PUSHED=$((DIGESTS_PUSHED + 1))
-  fi
-done < <(jq -c '.manifests[]' "${OCI_DIR}/index.json")
+  upload_manifest "${PRIMARY_FILE}" "${PRIMARY_DGST}" "${PRIMARY_CT}" "by digest"
+  UPLOADED_DIGESTS=",${PRIMARY_DGST},"
+  DIGESTS_PUSHED=1
+else
+  while IFS= read -r entry; do
+    REF=$(jq -r '.annotations["org.opencontainers.image.ref.name"] // empty' <<<"${entry}")
+    DGST=$(jq -r '.digest' <<<"${entry}")
+    FILE="${OCI_DIR}/blobs/sha256/${DGST#sha256:}"
+
+    if [[ ! -f "${FILE}" ]]; then
+      echo "❌ manifest blob not found: ${FILE}"
+      exit 1
+    fi
+
+    MEDIA_TYPE=$(jq -r '.mediaType // empty' "${FILE}")
+    CT=$(detect_ct "${MEDIA_TYPE}")
+
+    if [[ -n "${REF}" ]]; then
+      upload_manifest "${FILE}" "${REF}" "${CT}" "by tag  (${MEDIA_TYPE:-<none>})"
+      TAGS_PUSHED=$((TAGS_PUSHED + 1))
+      PUSHED_TAGS_LIST="${PUSHED_TAGS_LIST}${REF} "
+    fi
+
+    if [[ ",${UPLOADED_DIGESTS}," != *",${DGST},"* ]]; then
+      upload_manifest "${FILE}" "${DGST}" "${CT}" "by digest"
+      UPLOADED_DIGESTS="${UPLOADED_DIGESTS},${DGST}"
+      DIGESTS_PUSHED=$((DIGESTS_PUSHED + 1))
+    fi
+  done < <(jq -c '.manifests[]' "${OCI_DIR}/index.json")
+fi
 
 echo
 echo "=== VERIFICATION ==="
 echo "Tags (${TAGS_PUSHED}):"
-jq -r '.manifests[] | .annotations["org.opencontainers.image.ref.name"] // empty' "${OCI_DIR}/index.json" \
-  | while IFS= read -r ref; do
-      [[ -z "${ref}" ]] && continue
-      aws s3 ls "s3://${R2_BUCKET}/v2/${IMAGE_NAME}/manifests/${ref}" \
-        --endpoint-url "${R2_ENDPOINT}" || echo "  MISSING: ${ref}"
-    done
+for ref in ${PUSHED_TAGS_LIST}; do
+  [[ -z "${ref}" ]] && continue
+  aws s3 ls "s3://${R2_BUCKET}/v2/${IMAGE_NAME}/manifests/${ref}" \
+    --endpoint-url "${R2_ENDPOINT}" || echo "  MISSING: ${ref}"
+done
 echo
 echo "Digests (${DIGESTS_PUSHED}):"
 for d in ${UPLOADED_DIGESTS//,/ }; do
