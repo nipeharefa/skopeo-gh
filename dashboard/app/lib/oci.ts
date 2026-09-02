@@ -6,8 +6,21 @@ export interface Repo {
 
 export interface Tag {
 	tag: string;
-	size: number;
+	sizeBytes: number;
 	uploaded: Date;
+}
+
+interface OciDescriptor {
+	mediaType?: string;
+	size: number;
+	digest: string;
+}
+
+interface ImageManifest {
+	mediaType?: string;
+	config?: { size?: number };
+	layers?: { size?: number }[];
+	manifests?: OciDescriptor[];
 }
 
 const manifestsPrefix = (repo: string) => `v2/${repo}/manifests/`;
@@ -50,14 +63,41 @@ export async function listRepos(bucket: R2Bucket): Promise<Repo[]> {
 export async function listTags(bucket: R2Bucket, repo: string): Promise<Tag[]> {
 	const prefix = manifestsPrefix(repo);
 	const objects = await listAll(bucket, prefix);
-	return objects
-		.filter((o) => !isDigestKey(o.key))
-		.map((o) => ({
-			tag: o.key.slice(prefix.length),
-			size: o.size,
-			uploaded: o.uploaded,
-		}))
-		.sort((a, b) => b.uploaded.getTime() - a.uploaded.getTime());
+	return Promise.all(
+		objects
+			.filter((o) => !isDigestKey(o.key))
+			.map(async (o) => ({
+				tag: o.key.slice(prefix.length),
+				sizeBytes: await imageSize(bucket, repo, o.key.slice(prefix.length)),
+				uploaded: o.uploaded,
+			})),
+	).then((tags) => tags.sort((a, b) => b.uploaded.getTime() - a.uploaded.getTime()));
+}
+
+async function imageSize(bucket: R2Bucket, repo: string, tag: string): Promise<number> {
+	const obj = await bucket.get(`${manifestsPrefix(repo)}${tag}`);
+	if (!obj) return 0;
+	const manifest = await obj.json<ImageManifest>();
+
+	if (Array.isArray(manifest.manifests) && manifest.manifests.length > 0) {
+		const subSizes = await Promise.all(
+			manifest.manifests.map(async (desc) => {
+				const sub = await bucket.get(
+					`v2/${repo}/blobs/sha256/${desc.digest.replace("sha256:", "")}`,
+				);
+				if (!sub) return 0;
+				const subManifest = await sub.json<ImageManifest>();
+				return sizeOfManifest(subManifest);
+			}),
+		);
+		return subSizes.reduce((sum, size) => sum + size, 0);
+	}
+
+	return sizeOfManifest(manifest);
+}
+
+function sizeOfManifest(manifest: ImageManifest): number {
+	return (manifest.config?.size ?? 0) + (manifest.layers?.reduce((sum, l) => sum + (l.size ?? 0), 0) ?? 0);
 }
 
 export async function deleteTag(bucket: R2Bucket, repo: string, tag: string) {

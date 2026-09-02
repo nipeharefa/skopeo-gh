@@ -75,7 +75,7 @@ export default function Repo({ loaderData, actionData }: Route.ComponentProps) {
 							<thead className="border-b border-gray-800 bg-gray-900 text-gray-400">
 								<tr>
 									<th className="px-4 py-3 font-medium">Tag</th>
-									<th className="px-4 py-3 font-medium">Ukuran manifest</th>
+									<th className="px-4 py-3 font-medium">Ukuran image</th>
 									<th className="px-4 py-3 font-medium">Di-upload</th>
 									<th className="px-4 py-3 font-medium" />
 								</tr>
@@ -84,7 +84,7 @@ export default function Repo({ loaderData, actionData }: Route.ComponentProps) {
 								{tags.map((tag) => (
 									<tr key={tag.tag} className="bg-gray-950">
 										<td className="px-4 py-3 font-mono text-gray-200">{tag.tag}</td>
-										<td className="px-4 py-3 text-gray-400">{formatBytes(tag.size)}</td>
+										<td className="px-4 py-3 text-gray-400">{formatBytes(tag.sizeBytes)}</td>
 										<td className="px-4 py-3 text-gray-400">{formatDate(tag.uploaded)}</td>
 										<td className="px-4 py-3 text-right">
 											<form
@@ -120,7 +120,8 @@ export default function Repo({ loaderData, actionData }: Route.ComponentProps) {
 				<p className="mt-6 text-xs text-gray-600">
 					Menghapus tag hanya menghapus key <code>v2/{repo}/manifests/&lt;tag&gt;</code>.
 					Digest manifest <code>sha256:…</code> dan blobs dibiarkan — mungkin masih
-					dipakai tag lain.
+					dipakai tag lain. Ukuran image = total layer + config (semua platform untuk
+					image multi-arch).
 				</p>
 			</main>
 		</div>
