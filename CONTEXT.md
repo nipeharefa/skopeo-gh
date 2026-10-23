@@ -12,6 +12,14 @@ _Avoid_: repository, container
 Referensi bernama pada sebuah image, disimpan sebagai key `v2/<image>/manifests/<tag>` (mis. `v2/nginx/manifests/latest`).
 _Avoid_: version, label
 
+**Version (digest)**:
+Satu manifest unik yang diidentifikasi digest `sha256:<hash>` dan disimpan di `v2/<image>/manifests/sha256:<hash>`. Satu version bisa punya banyak tag.
+_Avoid_: image, artifact
+
+**Blob yatim**:
+Blob yang tidak lagi direferensikan manifest/index mana pun di image yang sama. Dibersihkan lewat aksi GC, bukan otomatis saat hapus tag/version.
+_Avoid_: unused layer, garbage only
+
 **Digest key**:
 Manifest yang disimpan berdasarkan digest-nya di `v2/<image>/manifests/sha256:<hash>`. Dibuat saat push untuk dedup antar tag; **bukan** referensi yang dikelola user.
 _Avoid_: hash reference
@@ -40,6 +48,14 @@ _Avoid_: cache, index
 Delete key `v2/<image>/manifests/<tag>` saja. Digest keys dan blobs **tidak** disentuh karena mungkin dipakai tag lain.
 _Avoid_: purge, cleanup
 
+**Hapus version**:
+Delete key `v2/<image>/manifests/sha256:<digest>` plus **semua tag** yang menunjuk digest tersebut. Blobs dibiarkan dan dibersihkan lewat **GC**.
+_Avoid_: delete tag only
+
+**GC blob yatim**:
+Scan semua manifest yang tersisa (termasuk sub-manifest multi-arch), tandai blob yang masih terjangkau, lalu hapus sisanya. Dijalankan manual dari dashboard, bukan otomatis.
+_Avoid_: auto cleanup
+
 **Hapus image (repo)**:
 Delete **seluruh** key di prefix `v2/<image>/` (termasuk blobs). Blobs tidak dishare antar image, jadi aman.
 _Avoid_: delete blob only
@@ -50,10 +66,12 @@ Auth yang direncanakan untuk melindungi dashboard (Cloudflare Zero Trust), ditun
 ## Relationships
 
 - Sebuah **image** memiliki satu atau lebih **tag**
+- Sebuah **version** bisa punya banyak **tag**; sebuah **tag** menunjuk tepat satu **version** (digest)
 - Sebuah **image** memiliki banyak **blob**; blob dishare antar **tag** pada image yang sama
 - Sebuah **tag** menunjuk ke satu **digest key** (dedup) atau manifest langsung
 - **Dashboard** membaca daftar image/tag langsung dari **R2 bucket** (bukan D1)
-- Menghapus **tag** mencatat `delete_tag` ke **D1**; menghapus **image** mencatat `delete_repo`
+- Menghapus **tag** mencatat `delete_tag` ke **D1**; menghapus **version** mencatat `delete_version` + digest; menghapus **image** mencatat `delete_repo`
+- **GC** menghapus blob yang tidak lagi terjangkau dari manifest yang tersisa
 - **Registry worker** dan **Dashboard** memakai **R2 bucket** yang sama, layout `v2/...` yang sama
 
 ## Example dialogue

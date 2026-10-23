@@ -1,3 +1,5 @@
+import type { Platform } from "./oci";
+
 export function formatBytes(bytes: number): string {
 	if (!Number.isFinite(bytes) || bytes <= 0) return "0 B";
 	const units = ["B", "KB", "MB", "GB", "TB"];
@@ -15,4 +17,16 @@ export function formatDate(timestamp: number | Date): string {
 		hour: "2-digit",
 		minute: "2-digit",
 	});
+}
+
+export function formatPlatform(platform: Platform): string {
+	return [platform.os, platform.architecture, platform.variant]
+		.filter(Boolean)
+		.join("/");
+}
+
+export function shortDigest(digest: string): string {
+	if (!digest) return "—";
+	const [algorithm, hash] = digest.split(":");
+	return hash ? `${algorithm}:${hash.slice(0, 12)}…` : digest.slice(0, 16);
 }
