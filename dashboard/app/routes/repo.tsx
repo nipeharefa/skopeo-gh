@@ -1,10 +1,11 @@
-import { Fragment, useMemo, useState, type ReactNode } from "react";
+import { Fragment, useEffect, useMemo, useState, type ReactNode } from "react";
 import { Link, redirect, useNavigation, useRevalidator } from "react-router";
 import type { Route } from "./+types/repo";
 import {
 	blobStorageSize,
 	deleteRepo,
 	deleteTag,
+	deleteTags,
 	deleteVersion,
 	gcOrphanBlobs,
 	listTags,
@@ -31,8 +32,11 @@ type GcPayload = {
 type ActionResult =
 	| { ok: false; error: string }
 	| { ok: true; action: "delete_tag"; tag: string }
+	| { ok: true; action: "delete_tags"; tags: string[] }
 	| { ok: true; action: "delete_version"; digest: string; tags: string[] }
 	| ({ ok: true; action: "gc" | "prune_untagged" } & GcPayload);
+
+const TAG_PATTERN = /^[A-Za-z0-9_][A-Za-z0-9._-]{0,127}$/;
 
 type SortField = "tag" | "size" | "uploaded";
 
@@ -65,10 +69,29 @@ export async function action({
 
 	if (intent === "delete_tag") {
 		const tag = String(formData.get("tag") ?? "");
-		if (!tag) return { ok: false, error: "Tag tidak valid." };
+		if (!TAG_PATTERN.test(tag)) return { ok: false, error: "Tag tidak valid." };
 		await deleteTag(env.OCI_BUCKET, params.name, tag);
 		await logAudit(env.DB, "delete_tag", params.name, tag);
 		return { ok: true, action: "delete_tag", tag };
+	}
+
+	if (intent === "delete_tags") {
+		const tags = [
+			...new Set(
+				formData
+					.getAll("tag")
+					.map(String)
+					.filter((tag) => TAG_PATTERN.test(tag)),
+			),
+		];
+		if (tags.length === 0) {
+			return { ok: false, error: "Tidak ada tag valid yang dipilih." };
+		}
+		const deleted = await deleteTags(env.OCI_BUCKET, params.name, tags);
+		for (const tag of deleted) {
+			await logAudit(env.DB, "delete_tag", params.name, tag);
+		}
+		return { ok: true, action: "delete_tags", tags: deleted };
 	}
 
 	if (intent === "delete_version") {
@@ -120,10 +143,20 @@ export default function Repo({ loaderData, actionData }: Route.ComponentProps) {
 	const [query, setQuery] = useState("");
 	const [expanded, setExpanded] = useState<string | null>(null);
 	const [copied, setCopied] = useState<string | null>(null);
+	const [selected, setSelected] = useState<Set<string>>(new Set());
 	const [sort, setSort] = useState<{ field: SortField; dir: "asc" | "desc" }>({
 		field: "uploaded",
 		dir: "desc",
 	});
+
+	useEffect(() => {
+		if (
+			actionData?.ok &&
+			(actionData.action === "delete_tag" || actionData.action === "delete_tags")
+		) {
+			setSelected(new Set());
+		}
+	}, [actionData]);
 
 	const visibleTags = useMemo(() => {
 		const needle = query.trim().toLowerCase();
@@ -152,6 +185,32 @@ export default function Repo({ loaderData, actionData }: Route.ComponentProps) {
 
 	const toggle = (tag: string) =>
 		setExpanded((current) => (current === tag ? null : tag));
+
+	const visibleSelected = visibleTags.filter((tag) => selected.has(tag.tag));
+	const allVisibleSelected =
+		visibleTags.length > 0 && visibleSelected.length === visibleTags.length;
+	const someVisibleSelected = visibleSelected.length > 0 && !allVisibleSelected;
+
+	const toggleSelect = (tag: string) =>
+		setSelected((current) => {
+			const next = new Set(current);
+			if (next.has(tag)) next.delete(tag);
+			else next.add(tag);
+			return next;
+		});
+
+	const toggleAllVisible = () =>
+		setSelected((current) => {
+			const next = new Set(current);
+			if (allVisibleSelected) {
+				for (const tag of visibleTags) next.delete(tag.tag);
+			} else {
+				for (const tag of visibleTags) next.add(tag.tag);
+			}
+			return next;
+		});
+
+	const clearSelection = () => setSelected(new Set());
 
 	const changeSort = (field: SortField) =>
 		setSort((current) =>
@@ -241,6 +300,12 @@ export default function Repo({ loaderData, actionData }: Route.ComponentProps) {
 						dihapus beserta {actionData.tags.length} tag. Blob menunggu GC.
 					</p>
 				)}
+				{actionData?.ok && actionData.action === "delete_tags" && (
+					<p className="mt-4 rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-2 text-sm text-emerald-700">
+						{actionData.tags.length} tag dihapus. Digest key dan blob tidak
+						disentuh.
+					</p>
+				)}
 				{actionData?.ok &&
 					(actionData.action === "gc" || actionData.action === "prune_untagged") &&
 					(actionData.aborted ? (
@@ -290,6 +355,26 @@ export default function Repo({ loaderData, actionData }: Route.ComponentProps) {
 					</div>
 				)}
 
+				{selected.size > 0 && (
+					<div className="mt-4 flex flex-wrap items-center justify-between gap-3 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-800">
+						<span>
+							<strong>{selected.size}</strong> tag dipilih
+							{selected.size > visibleSelected.length &&
+								` (${selected.size - visibleSelected.length} tersembunyi oleh filter)`}
+						</span>
+						<div className="flex flex-wrap items-center gap-2">
+							<button
+								type="button"
+								onClick={clearSelection}
+								className="rounded border border-red-300 bg-white px-3 py-1.5 text-sm font-medium text-red-700 hover:bg-red-100"
+							>
+								Batal
+							</button>
+							<BulkDeleteForm tags={[...selected]} busy={busy} />
+						</div>
+					</div>
+				)}
+
 				<div className="mt-6 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
 					<div className="relative w-full sm:max-w-sm">
 						<SearchIcon className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-gray-400" />
@@ -320,6 +405,18 @@ export default function Repo({ loaderData, actionData }: Route.ComponentProps) {
 						<table className="w-full min-w-[860px] text-left text-sm">
 							<thead className="border-b border-gray-200 bg-gray-50 text-xs font-medium uppercase tracking-wide text-gray-500">
 								<tr>
+									<th className="w-10 px-3 py-3">
+										<input
+											type="checkbox"
+											checked={allVisibleSelected}
+											ref={(element) => {
+												if (element) element.indeterminate = someVisibleSelected;
+											}}
+											onChange={toggleAllVisible}
+											aria-label="Pilih semua tag yang terlihat"
+											className="h-4 w-4 rounded border-gray-300 text-blue-600 focus:ring-blue-500"
+										/>
+									</th>
 									<th className="w-10 px-3 py-3" />
 									<th className="px-3 py-3">
 										<SortButton
@@ -357,6 +454,15 @@ export default function Repo({ loaderData, actionData }: Route.ComponentProps) {
 									return (
 										<Fragment key={tag.tag}>
 											<tr className={open ? "bg-blue-50/50" : "hover:bg-gray-50"}>
+												<td className="px-3 py-3 align-top">
+													<input
+														type="checkbox"
+														checked={selected.has(tag.tag)}
+														onChange={() => toggleSelect(tag.tag)}
+														aria-label={`Pilih tag ${tag.tag}`}
+														className="h-4 w-4 rounded border-gray-300 text-blue-600 focus:ring-blue-500"
+													/>
+												</td>
 												<td className="px-3 py-3 align-top">
 													<button
 														type="button"
@@ -401,7 +507,7 @@ export default function Repo({ loaderData, actionData }: Route.ComponentProps) {
 											</tr>
 											{open && (
 												<tr className="bg-gray-50">
-													<td colSpan={7} className="px-6 py-5">
+													<td colSpan={8} className="px-6 py-5">
 														<dl className="grid grid-cols-1 gap-4 sm:grid-cols-2">
 															<Detail label="Digest">
 																<span className="flex items-start gap-2">
@@ -603,6 +709,38 @@ function DeleteTagForm({ tag, busy }: { tag: string; busy: boolean }) {
 				className="rounded px-2 py-1 text-xs font-medium text-red-600 hover:bg-red-50 disabled:opacity-50"
 			>
 				Hapus tag
+			</button>
+		</form>
+	);
+}
+
+function BulkDeleteForm({ tags, busy }: { tags: string[]; busy: boolean }) {
+	return (
+		<form
+			method="post"
+			className="inline"
+			onSubmit={(event) => {
+				const preview = tags.slice(0, 5).join(", ");
+				const more = tags.length > 5 ? `, +${tags.length - 5} lainnya` : "";
+				if (
+					!window.confirm(
+						`Hapus ${tags.length} tag? ${preview}${more}.\n\nManifest tag dihapus; digest key dan blob tetap ada.`,
+					)
+				) {
+					event.preventDefault();
+				}
+			}}
+		>
+			<input type="hidden" name="intent" value="delete_tags" />
+			{tags.map((tag) => (
+				<input key={tag} type="hidden" name="tag" value={tag} />
+			))}
+			<button
+				type="submit"
+				disabled={busy}
+				className="rounded bg-red-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-red-700 disabled:opacity-50"
+			>
+				Hapus {tags.length} tag
 			</button>
 		</form>
 	);

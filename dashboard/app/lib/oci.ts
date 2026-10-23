@@ -257,6 +257,21 @@ export async function deleteTag(bucket: R2Bucket, repo: string, tag: string) {
 	await bucket.delete(`${manifestsPrefix(repo)}${tag}`);
 }
 
+// Deletes several tag keys at once. Digest keys and blobs are untouched, so
+// the affected versions remain pullable by digest until pruned.
+export async function deleteTags(
+	bucket: R2Bucket,
+	repo: string,
+	tags: string[],
+): Promise<string[]> {
+	const unique = [...new Set(tags.filter(Boolean))];
+	const keys = unique.map((tag) => `${manifestsPrefix(repo)}${tag}`);
+	for (let i = 0; i < keys.length; i += 1000) {
+		await bucket.delete(keys.slice(i, i + 1000));
+	}
+	return unique;
+}
+
 // Deletes a version identified by its digest: the digest key plus every tag
 // whose manifest bytes hash to that digest. Blobs are intentionally left in
 // place; run gcOrphanBlobs() to reclaim them.

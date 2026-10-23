@@ -52,6 +52,10 @@ _Avoid_: cache, index
 Delete key `v2/<image>/manifests/<tag>` saja. Digest keys dan blobs **tidak** disentuh karena mungkin dipakai tag lain.
 _Avoid_: purge, cleanup
 
+**Hapus tag (bulk)**:
+Hapus beberapa tag key sekaligus dalam satu aksi. Sama seperti hapus tag tunggal: digest key dan blob tidak disentuh.
+_Avoid_: bulk delete image
+
 **Hapus version**:
 Delete key `v2/<image>/manifests/sha256:<digest>` plus **semua tag** yang menunjuk digest tersebut. Blobs dibiarkan dan dibersihkan lewat **GC**.
 _Avoid_: delete tag only
