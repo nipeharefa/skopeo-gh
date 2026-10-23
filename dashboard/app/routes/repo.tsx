@@ -2,6 +2,7 @@ import { Fragment, useMemo, useState, type ReactNode } from "react";
 import { Link, redirect, useNavigation, useRevalidator } from "react-router";
 import type { Route } from "./+types/repo";
 import {
+	blobStorageSize,
 	deleteRepo,
 	deleteTag,
 	deleteVersion,
@@ -33,9 +34,13 @@ export function meta({ params }: Route.MetaArgs) {
 }
 
 export async function loader({ context, params }: Route.LoaderArgs) {
-	const tags = await listTags(context.cloudflare.env.OCI_BUCKET, params.name);
-	const totalSize = tags.reduce((sum, tag) => sum + tag.sizeBytes, 0);
-	return { repo: params.name, tags, totalSize };
+	const bucket = context.cloudflare.env.OCI_BUCKET;
+	const [tags, storageBytes] = await Promise.all([
+		listTags(bucket, params.name),
+		blobStorageSize(bucket, params.name),
+	]);
+	const totalImageBytes = tags.reduce((sum, tag) => sum + tag.imageBytes, 0);
+	return { repo: params.name, tags, storageBytes, totalImageBytes };
 }
 
 export async function action({
@@ -84,7 +89,7 @@ export async function action({
 }
 
 export default function Repo({ loaderData, actionData }: Route.ComponentProps) {
-	const { repo, tags, totalSize } = loaderData;
+	const { repo, tags, storageBytes, totalImageBytes } = loaderData;
 	const navigation = useNavigation();
 	const revalidator = useRevalidator();
 	const busy = navigation.state === "submitting";
@@ -114,7 +119,7 @@ export default function Repo({ loaderData, actionData }: Route.ComponentProps) {
 				case "tag":
 					return a.tag.localeCompare(b.tag) * direction;
 				case "size":
-					return (a.sizeBytes - b.sizeBytes) * direction;
+					return (a.imageBytes - b.imageBytes) * direction;
 				case "uploaded":
 					return (new Date(a.uploaded).getTime() - new Date(b.uploaded).getTime()) * direction;
 			}
@@ -176,7 +181,10 @@ export default function Repo({ loaderData, actionData }: Route.ComponentProps) {
 							{repo}
 						</h1>
 						<p className="mt-1 text-sm text-gray-500">
-							{tags.length} tag · {formatBytes(totalSize)} total
+							{tags.length} tag · {formatBytes(storageBytes)} tersimpan
+						</p>
+						<p className="text-xs text-gray-400">
+							Total ukuran image (config + layer): {formatBytes(totalImageBytes)}
 						</p>
 					</div>
 					<div className="flex flex-wrap items-center gap-2">
@@ -260,7 +268,7 @@ export default function Repo({ loaderData, actionData }: Route.ComponentProps) {
 									<th className="px-3 py-3">Platforms</th>
 									<th className="px-3 py-3">
 										<SortButton
-											label="Size"
+											label="Image size"
 											field="size"
 											sort={sort}
 											onSort={changeSort}
@@ -317,7 +325,7 @@ export default function Repo({ loaderData, actionData }: Route.ComponentProps) {
 													<PlatformChips platforms={tag.platforms} />
 												</td>
 												<td className="whitespace-nowrap px-3 py-3 align-top text-gray-600">
-													{formatBytes(tag.sizeBytes)}
+													{formatBytes(tag.imageBytes)}
 												</td>
 												<td className="whitespace-nowrap px-3 py-3 align-top text-gray-600">
 													{formatDate(tag.uploaded)}
@@ -353,7 +361,7 @@ export default function Repo({ loaderData, actionData }: Route.ComponentProps) {
 																<PlatformChips platforms={tag.platforms} />
 															</Detail>
 															<Detail label="Ukuran image">
-																{formatBytes(tag.sizeBytes)}
+																{formatBytes(tag.imageBytes)}
 															</Detail>
 															<Detail label="Di-upload">
 																{formatDate(tag.uploaded)}
@@ -391,6 +399,14 @@ export default function Repo({ loaderData, actionData }: Route.ComponentProps) {
 					Hapus version menghapus digest key dan semua tag yang menunjuk ke digest
 					tersebut. Hapus repo menghapus seluruh prefix <code>v2/{repo}/</code>{" "}
 					termasuk blob.
+				</p>
+				<p className="mt-2 text-xs text-gray-500">
+					<span className="font-medium text-gray-600">Tersimpan (blobs)</span> = total
+					objek unik di <code>v2/{repo}/blobs/sha256/</code>, termasuk manifest,
+					sub-manifest, attestation, dan blob yatim sampai GC dijalankan.{" "}
+					<span className="font-medium text-gray-600">Image size</span> per tag =
+					config + layer; layer yang dipakai bersama antar tag bisa terhitung lebih
+					dari sekali.
 				</p>
 			</main>
 		</div>

@@ -1,7 +1,7 @@
 export interface Repo {
 	name: string;
 	tagCount: number;
-	sizeBytes: number;
+	storageBytes: number;
 }
 
 export interface Platform {
@@ -14,7 +14,7 @@ export interface Tag {
 	tag: string;
 	digest: string;
 	mediaType?: string;
-	sizeBytes: number;
+	imageBytes: number;
 	uploaded: Date;
 	platforms: Platform[];
 }
@@ -198,6 +198,14 @@ async function imageSize(
 	return sizeOfManifest(manifest);
 }
 
+export async function blobStorageSize(
+	bucket: R2Bucket,
+	repo: string,
+): Promise<number> {
+	const blobs = await listAll(bucket, blobsPrefix(repo));
+	return blobs.reduce((sum, object) => sum + object.size, 0);
+}
+
 export async function listRepos(bucket: R2Bucket): Promise<Repo[]> {
 	const page = await bucket.list({ prefix: "v2/", delimiter: "/", limit: 1000 });
 	const names = page.delimitedPrefixes
@@ -207,13 +215,12 @@ export async function listRepos(bucket: R2Bucket): Promise<Repo[]> {
 
 	return Promise.all(
 		names.map(async (name) => {
-			const [manifests, blobs] = await Promise.all([
+			const [manifests, storageBytes] = await Promise.all([
 				listAll(bucket, manifestsPrefix(name)),
-				listAll(bucket, blobsPrefix(name)),
+				blobStorageSize(bucket, name),
 			]);
 			const tagCount = manifests.filter((o) => !isDigestKey(o.key)).length;
-			const sizeBytes = blobs.reduce((sum, o) => sum + o.size, 0);
-			return { name, tagCount, sizeBytes };
+			return { name, tagCount, storageBytes };
 		}),
 	);
 }
@@ -228,7 +235,7 @@ export async function listTags(bucket: R2Bucket, repo: string): Promise<Tag[]> {
 			.map(async (o) => {
 				const tag = o.key.slice(prefix.length);
 				const manifest = await readManifest(bucket, o.key);
-				const [sizeBytes, platforms] = await Promise.all([
+				const [imageBytes, platforms] = await Promise.all([
 					imageSize(bucket, repo, manifest?.json ?? null),
 					imagePlatforms(bucket, repo, manifest?.json ?? null),
 				]);
@@ -236,7 +243,7 @@ export async function listTags(bucket: R2Bucket, repo: string): Promise<Tag[]> {
 					tag,
 					digest: manifest?.digest ?? "",
 					mediaType: manifest?.json.mediaType,
-					sizeBytes,
+					imageBytes,
 					platforms,
 					uploaded: o.uploaded,
 				};

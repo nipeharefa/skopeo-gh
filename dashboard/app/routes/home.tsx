@@ -142,7 +142,12 @@ export default function Home({ loaderData, actionData }: Route.ComponentProps) {
 								<tr>
 									<th className="px-4 py-3">Image</th>
 									<th className="px-4 py-3">Tags</th>
-									<th className="px-4 py-3">Ukuran blobs</th>
+									<th
+										className="px-4 py-3"
+										title="Total objek unik di v2/<image>/blobs/sha256/"
+									>
+										Tersimpan (blobs)
+									</th>
 									<th className="px-4 py-3 text-right">Actions</th>
 								</tr>
 							</thead>
@@ -159,7 +164,7 @@ export default function Home({ loaderData, actionData }: Route.ComponentProps) {
 										</td>
 										<td className="px-4 py-3 text-gray-600">{repo.tagCount}</td>
 										<td className="whitespace-nowrap px-4 py-3 text-gray-600">
-											{formatBytes(repo.sizeBytes)}
+											{formatBytes(repo.storageBytes)}
 										</td>
 										<td className="px-4 py-3 text-right">
 											<DeleteRepoForm repo={repo.name} busy={busy} />
