@@ -274,8 +274,7 @@ Trigger: manual (`workflow_dispatch`, dengan input source image, tag, severity, 
 
 Butuh secrets/vars yang sama seperti action `push-to-r2`:
 
-- Secrets: `R2_AWS_ACCESS_KEY_ID`, `R2_AWS_SECRET_ACCESS_KEY`
-- Variables: `R2_BUCKET`, `R2_ENDPOINT`
+- Secrets: `R2_AWS_ACCESS_KEY_ID`, `R2_AWS_SECRET_ACCESS_KEY`, `R2_BUCKET`, `R2_ENDPOINT`
 
 Catatan: runner Ubuntu tidak punya Nix, jadi workflow membuat shim `nix-shell` kecil yang menjalankan perintah `--run` memakai `skopeo` dari apt.
 
