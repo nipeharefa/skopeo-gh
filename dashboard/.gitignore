@@ -201,3 +201,6 @@ dist
 ### React Router ###
 .react-router/
 /build/
+
+### Local Cloudflare config (account-specific) ###
+/wrangler.json

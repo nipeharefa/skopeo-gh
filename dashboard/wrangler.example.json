@@ -12,14 +12,14 @@
 		{
 			"binding": "DB",
 			"database_name": "oci-dashboard",
-			"database_id": "2c4effaa-83c2-46cd-bf66-6032d6afbf0e",
+			"database_id": "<your-d1-database-id>",
 			"migrations_dir": "migrations"
 		}
 	],
 	"r2_buckets": [
 		{
 			"binding": "OCI_BUCKET",
-			"bucket_name": "catetin-container"
+			"bucket_name": "<your-r2-bucket>"
 		}
 	]
 }
