@@ -1,0 +1,156 @@
+name: nginx scan and push
+
+# Copy nginx from its source registry into an OCI layout, scan it with Trivy,
+# then publish the layout to the R2-backed OCI registry using the reusable
+# composite action in .github/actions/push-to-r2.
+#
+# Required repository configuration (Settings -> Secrets and variables -> Actions):
+#   Secrets:  R2_AWS_ACCESS_KEY_ID, R2_AWS_SECRET_ACCESS_KEY
+#   Variables: R2_BUCKET, R2_ENDPOINT
+#
+# The job fails before pushing when Trivy reports findings at or above the
+# configured severity, unless fail-on-findings is set to false.
+
+on:
+  workflow_dispatch:
+    inputs:
+      source-image:
+        description: Source image reference (no transport prefix)
+        type: string
+        default: nginx:latest
+      image-name:
+        description: Target image name in the R2-backed registry
+        type: string
+        default: nginx
+      tag:
+        description: Tag to publish
+        type: string
+        default: latest
+      severity:
+        description: Comma-separated Trivy severities that gate the push
+        type: string
+        default: CRITICAL,HIGH
+      fail-on-findings:
+        description: Fail before pushing when matching vulnerabilities are found
+        type: choice
+        options:
+          - "true"
+          - "false"
+        default: "true"
+  schedule:
+    # Nightly refresh so upstream nginx CVEs are re-evaluated.
+    - cron: "0 3 * * *"
+
+permissions:
+  contents: read
+  security-events: write
+
+concurrency:
+  group: nginx-scan-push
+  cancel-in-progress: false
+
+jobs:
+  scan-and-push:
+    name: copy, scan, push
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      IMAGE_NAME: ${{ inputs.image-name || 'nginx' }}
+      TAG: ${{ inputs.tag || 'latest' }}
+      SOURCE_REF: ${{ inputs.source-image || 'nginx:latest' }}
+      OCI_DIR: ./tmp/nginx
+      MULTI_ARCH: all
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Install skopeo and jq
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y skopeo jq
+          skopeo --version
+          jq --version
+
+          # copy-and-push-r2.sh shells out to `nix-shell -p skopeo --run "<cmd>"`.
+          # Ubuntu runners are not Nix-based, so provide a minimal shim that
+          # executes the command with the apt-installed skopeo instead.
+          sudo tee /usr/local/bin/nix-shell >/dev/null <<'SHIM'
+          #!/usr/bin/env bash
+          set -euo pipefail
+          while [[ $# -gt 0 ]]; do
+            case "$1" in
+              --run)
+                shift
+                exec bash -c "$1"
+                ;;
+              *) shift ;;
+            esac
+          done
+          echo "nix-shell shim: no --run argument supplied" >&2
+          exit 1
+          SHIM
+          sudo chmod +x /usr/local/bin/nix-shell
+
+      - name: Copy image to OCI layout
+        env:
+          COPY_ONLY: "1"
+          SOURCE_IMAGE: docker://${{ inputs.source-image || 'nginx:latest' }}
+          SRC_NO_CREDS: "1"
+        run: ./copy-and-push-r2.sh
+
+      - name: Scan image with Trivy
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          image-ref: ${{ inputs.source-image || 'nginx:latest' }}
+          format: sarif
+          output: trivy-results.sarif
+          severity: ${{ inputs.severity || 'CRITICAL,HIGH' }}
+          vuln-type: os,library
+          ignore-unfixed: true
+          exit-code: ${{ inputs.fail-on-findings == 'false' && '0' || '1' }}
+
+      - name: Upload Trivy SARIF
+        if: always()
+        continue-on-error: true
+        uses: github/codeql-action/upload-sarif@v4
+        with:
+          sarif_file: trivy-results.sarif
+          category: trivy
+
+      - name: Upload Trivy report
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: trivy-results
+          path: trivy-results.sarif
+          if-no-files-found: ignore
+
+      - name: Verify R2 configuration
+        env:
+          R2_BUCKET: ${{ vars.R2_BUCKET }}
+          R2_ENDPOINT: ${{ vars.R2_ENDPOINT }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_AWS_SECRET_ACCESS_KEY }}
+        run: |
+          missing=0
+          for name in R2_BUCKET R2_ENDPOINT AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY; do
+            if [[ -z "${!name:-}" ]]; then
+              echo "::error::${name} is not configured (see .github/actions/push-to-r2/README.md)"
+              missing=1
+            fi
+          done
+          exit "${missing}"
+
+      - name: Push OCI layout to R2
+        uses: ./.github/actions/push-to-r2
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_AWS_SECRET_ACCESS_KEY }}
+        with:
+          image-name: ${{ inputs.image-name || 'nginx' }}
+          oci-dir: ./tmp/nginx
+          r2-bucket: ${{ vars.R2_BUCKET }}
+          r2-endpoint: ${{ vars.R2_ENDPOINT }}
+          tags: ${{ inputs.tag || 'latest' }}
+          aws-region: auto

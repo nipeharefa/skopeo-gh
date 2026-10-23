@@ -1,0 +1,27 @@
+#!/usr/bin/env bash
+# Test stub for the AWS CLI.
+#
+# Records every invocation to $AWS_LOG (one line, space separated) and fakes
+# successful S3 calls. Tests assert on the recorded arguments, so no network
+# and no credentials are ever involved.
+set -uo pipefail
+
+if [[ -n "${AWS_LOG:-}" ]]; then
+  {
+    printf 'aws'
+    printf ' %s' "$@"
+    printf '\n'
+  } >> "$AWS_LOG"
+fi
+
+case "${1:-} ${2:-}" in
+  "s3 ls")
+    if [[ "${STUB_AWS_FAIL_LS:-0}" == "1" ]]; then
+      exit 1
+    fi
+    # Non-empty so `aws s3 ls ... | wc -l` reports a count.
+    printf '2026-01-01 00:00:00   1234 stub-key\n'
+    ;;
+esac
+
+exit 0

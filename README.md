@@ -44,6 +44,9 @@ nix-shell --version && aws --version && jq --version
 | `copy-and-push-r2.sh` | Script utama: copy image via skopeo + push ke R2 |
 | `worker.js` | Cloudflare Worker: serve R2 sebagai OCI/Docker registry (patched, multi-arch compatible) |
 | `.github/actions/push-to-r2/` | Composite GitHub Action untuk mode `PUSH_ONLY` (reusable dari repo lain) |
+| `test/` | Unit test bats untuk `copy-and-push-r2.sh` (offline: `nix-shell` + `aws` di-stub) |
+| `Makefile` | `make test` untuk menjalankan suite |
+| `.github/workflows/nginx-scan-push.yaml` | Pipeline nginx: copy → Trivy scan → push R2 |
 | `sample/` | Contoh OCI layout `nginx:alpine` (linux/arm64, single-arch manifest) |
 
 ## Quick start
@@ -89,6 +92,24 @@ SOURCE_IMAGE=docker://registry.fly.io/myapp:tag \
 IMAGE_NAME=myapp TAG=tag OCI_DIR=./tmp-myapp \
 ./copy-and-push-r2.sh
 ```
+
+## Unit test
+
+Script diuji dengan [bats-core](https://github.com/bats-core/bats-core) secara offline: `nix-shell` dan `aws` diganti stub, dan layout OCI dibuat sebagai fixture. Tidak butuh skopeo, network, atau kredensial R2.
+
+```bash
+make test          # jalankan semua test
+make test-verbose  # tampilkan output test yang lulus
+```
+
+Prasyarat: `bats` dan `jq`.
+
+```bash
+brew install bats-core jq          # macOS
+sudo apt-get install -y bats jq    # Debian/Ubuntu
+```
+
+Cakupan: validasi env, penyusunan flag skopeo, mapping `detect_ct()`, upload tag/digest + dedup, override `PUSH_TAGS`, dan semua error path layout OCI. CI menjalankannya di `.github/workflows/test.yaml` (Ubuntu + macOS).
 
 ## Mode operasi
 
@@ -239,6 +260,24 @@ Catatan:
 - `tags: myapp:...` wajib agar annotation `org.opencontainers.image.ref.name` tertulis di `index.json`; tanpa itu tag tidak akan ter-upload ke R2 (lihat troubleshooting action).
 - Multi-arch: tambahkan `platforms: linux/amd64,linux/arm64` — buildx otomatis menghasilkan OCI image **index**, dan `detect_ct()` di script akan memetakan ke `application/vnd.oci.image.index.v1+json`. Worker patched (`worker.js` di repo ini) wajib untuk serve image multi-arch.
 - Cache buildx (opsional): tambahkan `cache-from`/`cache-to` seperti biasa; tidak mempengaruhi output OCI layout.
+
+## Pipeline: nginx → scan → R2
+
+`.github/workflows/nginx-scan-push.yaml` menjalankan alur lengkap untuk nginx:
+
+1. `actions/checkout@v7`.
+2. Install `skopeo` + `jq`, lalu salin image ke OCI layout via `copy-and-push-r2.sh` (`COPY_ONLY=1`).
+3. Scan dengan Trivy (`CRITICAL,HIGH`, `ignore-unfixed`). Hasil SARIF di-upload ke code scanning dan sebagai artifact.
+4. Push OCI layout ke R2 via composite action `push-to-r2`.
+
+Trigger: manual (`workflow_dispatch`, dengan input source image, tag, severity, dan `fail-on-findings`) serta nightly `03:00 UTC`. Push dilewati bila Trivy menemukan kerentanan; set `fail-on-findings=false` untuk tetap push.
+
+Butuh secrets/vars yang sama seperti action `push-to-r2`:
+
+- Secrets: `R2_AWS_ACCESS_KEY_ID`, `R2_AWS_SECRET_ACCESS_KEY`
+- Variables: `R2_BUCKET`, `R2_ENDPOINT`
+
+Catatan: runner Ubuntu tidak punya Nix, jadi workflow membuat shim `nix-shell` kecil yang menjalankan perintah `--run` memakai `skopeo` dari apt.
 
 ## Struktur key R2
 

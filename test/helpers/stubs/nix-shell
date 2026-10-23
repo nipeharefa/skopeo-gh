@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+# Test stub for nix-shell.
+#
+# The real script runs:
+#   nix-shell -p skopeo --run "skopeo copy ... oci:<dir>:<tag>"
+# We record the invocation and (optionally) materialize a prepared OCI layout
+# at $STUB_OCI_DIR so the rest of the script can run offline. No skopeo needed.
+set -uo pipefail
+
+if [[ -n "${STUB_NIX_LOG:-}" ]]; then
+  printf '%s\n' "$*" >> "$STUB_NIX_LOG"
+fi
+
+if [[ -n "${STUB_OCI_FIXTURE:-}" && -n "${STUB_OCI_DIR:-}" ]]; then
+  mkdir -p "$STUB_OCI_DIR"
+  cp -R "${STUB_OCI_FIXTURE}/." "${STUB_OCI_DIR}/"
+fi
+
+exit 0
