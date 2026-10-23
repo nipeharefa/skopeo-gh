@@ -8,6 +8,7 @@ import {
 	deleteVersion,
 	gcOrphanBlobs,
 	listTags,
+	listUntaggedVersions,
 	type Platform,
 } from "../lib/oci";
 import { logAudit } from "../lib/audit";
@@ -18,11 +19,20 @@ import {
 	shortDigest,
 } from "../lib/format";
 
+type GcPayload = {
+	deleted: number;
+	kept: number;
+	scanned: number;
+	untagged: number;
+	pruned: string[];
+	aborted: boolean;
+};
+
 type ActionResult =
 	| { ok: false; error: string }
 	| { ok: true; action: "delete_tag"; tag: string }
 	| { ok: true; action: "delete_version"; digest: string; tags: string[] }
-	| { ok: true; action: "gc"; deleted: number; kept: number; scanned: number };
+	| ({ ok: true; action: "gc" | "prune_untagged" } & GcPayload);
 
 type SortField = "tag" | "size" | "uploaded";
 
@@ -35,12 +45,13 @@ export function meta({ params }: Route.MetaArgs) {
 
 export async function loader({ context, params }: Route.LoaderArgs) {
 	const bucket = context.cloudflare.env.OCI_BUCKET;
-	const [tags, storageBytes] = await Promise.all([
+	const [tags, storageBytes, untaggedVersions] = await Promise.all([
 		listTags(bucket, params.name),
 		blobStorageSize(bucket, params.name),
+		listUntaggedVersions(bucket, params.name),
 	]);
 	const totalImageBytes = tags.reduce((sum, tag) => sum + tag.imageBytes, 0);
-	return { repo: params.name, tags, storageBytes, totalImageBytes };
+	return { repo: params.name, tags, storageBytes, totalImageBytes, untaggedVersions };
 }
 
 export async function action({
@@ -70,9 +81,21 @@ export async function action({
 		return { ok: true, action: "delete_version", digest, tags };
 	}
 
-	if (intent === "gc") {
-		const result = await gcOrphanBlobs(env.OCI_BUCKET, params.name);
-		return { ok: true, action: "gc", ...result };
+	if (intent === "gc" || intent === "prune_untagged") {
+		const pruneUntagged = intent === "prune_untagged";
+		const result = await gcOrphanBlobs(env.OCI_BUCKET, params.name, {
+			pruneUntagged,
+		});
+		if (pruneUntagged) {
+			for (const digest of result.pruned) {
+				await logAudit(env.DB, "delete_version", params.name, null, digest);
+			}
+		}
+		return {
+			ok: true,
+			action: pruneUntagged ? "prune_untagged" : "gc",
+			...result,
+		};
 	}
 
 	if (intent === "delete_repo") {
@@ -89,7 +112,7 @@ export async function action({
 }
 
 export default function Repo({ loaderData, actionData }: Route.ComponentProps) {
-	const { repo, tags, storageBytes, totalImageBytes } = loaderData;
+	const { repo, tags, storageBytes, totalImageBytes, untaggedVersions } = loaderData;
 	const navigation = useNavigation();
 	const revalidator = useRevalidator();
 	const busy = navigation.state === "submitting";
@@ -218,11 +241,53 @@ export default function Repo({ loaderData, actionData }: Route.ComponentProps) {
 						dihapus beserta {actionData.tags.length} tag. Blob menunggu GC.
 					</p>
 				)}
-				{actionData?.ok && actionData.action === "gc" && (
-					<p className="mt-4 rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-2 text-sm text-emerald-700">
-						GC selesai: {actionData.deleted} dari {actionData.scanned} blob dihapus,{" "}
-						{actionData.kept} masih direferensikan.
-					</p>
+				{actionData?.ok &&
+					(actionData.action === "gc" || actionData.action === "prune_untagged") &&
+					(actionData.aborted ? (
+						<p className="mt-4 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-800">
+							GC dibatalkan karena ada manifest yang tidak bisa dibaca. Tidak ada
+							blob yang dihapus.
+						</p>
+					) : (
+						<p className="mt-4 rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-2 text-sm text-emerald-700">
+							GC selesai: {actionData.deleted} dari {actionData.scanned} blob dihapus,{" "}
+							{actionData.kept} masih direferensikan.
+							{actionData.pruned.length > 0 &&
+								` ${actionData.pruned.length} version tanpa tag dihapus.`}
+							{actionData.action === "gc" &&
+								actionData.untagged > 0 &&
+								` ${actionData.untagged} version tanpa tag dipertahankan.`}
+						</p>
+					))}
+
+				{untaggedVersions.length > 0 && (
+					<div className="mt-4 rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900">
+						<div className="flex flex-wrap items-center justify-between gap-3">
+							<div>
+								<p className="font-medium">
+									{untaggedVersions.length} version tanpa tag
+								</p>
+								<p className="mt-0.5 text-xs text-amber-800">
+									Digest key masih ada, jadi blob tetap dipertahankan GC dan version
+									masih bisa dipull by digest. Prune menghapus digest key lalu
+									membersihkan blob yang tidak dipakai version lain.
+								</p>
+							</div>
+							<PruneForm count={untaggedVersions.length} busy={busy} />
+						</div>
+						<details className="mt-2">
+							<summary className="cursor-pointer text-xs font-medium text-amber-800">
+								Lihat digest
+							</summary>
+							<ul className="mt-1 max-h-40 space-y-0.5 overflow-y-auto font-mono text-xs">
+								{untaggedVersions.map((digest) => (
+									<li key={digest} className="break-all">
+										{digest}
+									</li>
+								))}
+							</ul>
+						</details>
+					</div>
 				)}
 
 				<div className="mt-6 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
@@ -592,7 +657,7 @@ function GcForm({ busy }: { busy: boolean }) {
 			onSubmit={(event) => {
 				if (
 					!window.confirm(
-						"Hapus blob yang tidak lagi direferensikan manifest mana pun di repo ini? Proses ini menghitung ulang semua referensi.",
+						"Hapus blob yang tidak lagi direferensikan manifest mana pun di repo ini? Version tanpa tag tetap dipertahankan.",
 					)
 				) {
 					event.preventDefault();
@@ -606,6 +671,33 @@ function GcForm({ busy }: { busy: boolean }) {
 				className="rounded border border-gray-300 bg-white px-3 py-1.5 text-sm font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-50"
 			>
 				GC blob yatim
+			</button>
+		</form>
+	);
+}
+
+function PruneForm({ count, busy }: { count: number; busy: boolean }) {
+	return (
+		<form
+			method="post"
+			className="inline"
+			onSubmit={(event) => {
+				if (
+					!window.confirm(
+						`Hapus ${count} version tanpa tag? Digest key dihapus, lalu blob yang tidak dipakai version lain dibersihkan. Version ini tidak akan bisa dipull by digest lagi.`,
+					)
+				) {
+					event.preventDefault();
+				}
+			}}
+		>
+			<input type="hidden" name="intent" value="prune_untagged" />
+			<button
+				type="submit"
+				disabled={busy}
+				className="rounded bg-amber-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-amber-700 disabled:opacity-50"
+			>
+				Prune {count} version
 			</button>
 		</form>
 	);

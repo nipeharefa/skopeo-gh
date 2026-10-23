@@ -285,27 +285,133 @@ export async function deleteVersion(
 	return { tags: matching.map((key) => key.slice(prefix.length)).sort() };
 }
 
+export interface GcOptions {
+	pruneUntagged?: boolean;
+}
+
+export interface GcResult {
+	deleted: number;
+	kept: number;
+	scanned: number;
+	untagged: number;
+	pruned: string[];
+	aborted: boolean;
+}
+
+interface ManifestIndex {
+	tagManifests: RawManifest[];
+	taggedDigests: Set<string>;
+	untagged: string[];
+	readFailures: string[];
+}
+
+async function indexManifests(
+	bucket: R2Bucket,
+	repo: string,
+	objects: R2Object[],
+): Promise<ManifestIndex> {
+	const prefix = manifestsPrefix(repo);
+	const digestKeys: string[] = [];
+	const tagObjects: R2Object[] = [];
+
+	for (const object of objects) {
+		if (isDigestKey(object.key)) {
+			digestKeys.push(object.key.slice(prefix.length));
+		} else {
+			tagObjects.push(object);
+		}
+	}
+
+	const taggedDigests = new Set<string>();
+	const tagManifests: RawManifest[] = [];
+	const readFailures: string[] = [];
+
+	for (const object of tagObjects) {
+		const manifest = await readManifest(bucket, object.key);
+		if (!manifest) {
+			readFailures.push(object.key);
+			continue;
+		}
+		tagManifests.push(manifest);
+		taggedDigests.add(manifest.digest);
+	}
+
+	return {
+		tagManifests,
+		taggedDigests,
+		untagged: digestKeys.filter((digest) => !taggedDigests.has(digest)).sort(),
+		readFailures,
+	};
+}
+
+// Digest keys that no tag points to. Their blobs stay pullable by digest, so
+// GC keeps them until the version is explicitly pruned.
+export async function listUntaggedVersions(
+	bucket: R2Bucket,
+	repo: string,
+): Promise<string[]> {
+	const objects = await listAll(bucket, manifestsPrefix(repo));
+	const index = await indexManifests(bucket, repo, objects);
+	return index.untagged;
+}
+
 // Removes blobs that are no longer reachable from any manifest left in the
-// repository. Blobs are per-repo in this layout, so this cannot affect other
-// images.
+// repository. By default every digest key is a GC root (untagged versions stay
+// pullable by digest). With pruneUntagged, digest keys without a tag are
+// removed first and their blobs become collectable.
 export async function gcOrphanBlobs(
 	bucket: R2Bucket,
 	repo: string,
-): Promise<{ deleted: number; kept: number; scanned: number }> {
+	options: GcOptions = {},
+): Promise<GcResult> {
 	const [manifestObjects, blobObjects] = await Promise.all([
 		listAll(bucket, manifestsPrefix(repo)),
 		listAll(bucket, blobsPrefix(repo)),
 	]);
 
+	const index = await indexManifests(bucket, repo, manifestObjects);
+	const aborted = (reason: string): GcResult => {
+		console.warn(reason);
+		return {
+			deleted: 0,
+			kept: blobObjects.length,
+			scanned: blobObjects.length,
+			untagged: index.untagged.length,
+			pruned: [],
+			aborted: true,
+		};
+	};
+
+	if (index.readFailures.length > 0) {
+		return aborted(`gc: unreadable manifest(s): ${index.readFailures.join(", ")}`);
+	}
+
+	const roots: RawManifest[] = [];
+	const seenTopLevel = new Set<string>();
+	const addRoot = (manifest: RawManifest | null) => {
+		if (!manifest || seenTopLevel.has(manifest.digest)) return;
+		seenTopLevel.add(manifest.digest);
+		roots.push(manifest);
+	};
+
+	for (const manifest of index.tagManifests) addRoot(manifest);
+
+	const pruning = Boolean(options.pruneUntagged);
+	if (!pruning) {
+		for (const digest of index.untagged) {
+			const manifest = await readManifest(bucket, `${manifestsPrefix(repo)}${digest}`);
+			if (!manifest) {
+				return aborted(`gc: unreadable untagged manifest: ${digest}`);
+			}
+			addRoot(manifest);
+		}
+	}
+
 	const reachable = new Set<string>();
 	const toParse: string[] = [];
 	const queued = new Set<string>();
-	const seenTopLevel = new Set<string>();
 
-	for (const object of manifestObjects) {
-		const manifest = await readManifest(bucket, object.key);
-		if (!manifest || seenTopLevel.has(manifest.digest)) continue;
-		seenTopLevel.add(manifest.digest);
+	for (const manifest of roots) {
 		// The top-level manifest is also stored under blobs/ by skopeo.
 		reachable.add(manifest.digest);
 		collectReferences(manifest.json, reachable, toParse, queued);
@@ -315,8 +421,19 @@ export async function gcOrphanBlobs(
 		const digest = toParse.shift();
 		if (!digest) continue;
 		const sub = await readManifest(bucket, blobKey(repo, digest));
-		if (!sub) continue;
+		if (!sub) {
+			return aborted(`gc: unreadable sub-manifest: ${digest}`);
+		}
 		collectReferences(sub.json, reachable, toParse, queued);
+	}
+
+	let pruned: string[] = [];
+	if (pruning && index.untagged.length > 0) {
+		const keys = index.untagged.map((digest) => `${manifestsPrefix(repo)}${digest}`);
+		for (let i = 0; i < keys.length; i += 1000) {
+			await bucket.delete(keys.slice(i, i + 1000));
+		}
+		pruned = index.untagged;
 	}
 
 	const prefix = blobsPrefix(repo);
@@ -332,6 +449,9 @@ export async function gcOrphanBlobs(
 		deleted: orphans.length,
 		kept: blobObjects.length - orphans.length,
 		scanned: blobObjects.length,
+		untagged: index.untagged.length,
+		pruned,
+		aborted: false,
 	};
 }
 

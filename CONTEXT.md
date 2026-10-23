@@ -16,6 +16,10 @@ _Avoid_: version, label
 Satu manifest unik yang diidentifikasi digest `sha256:<hash>` dan disimpan di `v2/<image>/manifests/sha256:<hash>`. Satu version bisa punya banyak tag.
 _Avoid_: image, artifact
 
+**Version tanpa tag**:
+Digest key `v2/<image>/manifests/sha256:<hash>` yang tidak lagi punya tag. Blob-nya tetap dipertahankan GC karena masih bisa dipull by digest; hanya dibersihkan lewat **Prune version tanpa tag**.
+_Avoid_: orphan tag, dangling tag
+
 **Blob yatim**:
 Blob yang tidak lagi direferensikan manifest/index mana pun di image yang sama. Dibersihkan lewat aksi GC, bukan otomatis saat hapus tag/version.
 _Avoid_: unused layer, garbage only
@@ -53,7 +57,7 @@ Delete key `v2/<image>/manifests/sha256:<digest>` plus **semua tag** yang menunj
 _Avoid_: delete tag only
 
 **GC blob yatim**:
-Scan semua manifest yang tersisa (termasuk sub-manifest multi-arch), tandai blob yang masih terjangkau, lalu hapus sisanya. Dijalankan manual dari dashboard, bukan otomatis.
+Scan semua manifest yang tersisa (termasuk sub-manifest multi-arch), tandai blob yang masih terjangkau, lalu hapus sisanya. Digest key dianggap root, jadi version tanpa tag dipertahankan sampai di-prune eksplisit. Dijalankan manual dari dashboard, bukan otomatis.
 _Avoid_: auto cleanup
 
 **Hapus image (repo)**:
@@ -71,7 +75,7 @@ Auth yang direncanakan untuk melindungi dashboard (Cloudflare Zero Trust), ditun
 - Sebuah **tag** menunjuk ke satu **digest key** (dedup) atau manifest langsung
 - **Dashboard** membaca daftar image/tag langsung dari **R2 bucket** (bukan D1)
 - Menghapus **tag** mencatat `delete_tag` ke **D1**; menghapus **version** mencatat `delete_version` + digest; menghapus **image** mencatat `delete_repo`
-- **GC** menghapus blob yang tidak lagi terjangkau dari manifest yang tersisa
+- **GC** menghapus blob yang tidak lagi terjangkau dari manifest yang tersisa; digest key tanpa tag baru hilang lewat **Prune version tanpa tag**
 - **Registry worker** dan **Dashboard** memakai **R2 bucket** yang sama, layout `v2/...` yang sama
 
 ## Example dialogue
