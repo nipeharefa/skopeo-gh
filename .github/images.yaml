@@ -1,0 +1,15 @@
+images:
+  # First smoke test: small, public, no Hub rate limit.
+  - source: mirror.gcr.io/library/alpine:3.21
+    image: alpine
+
+  - source: gcr.io/distroless/nodejs26-debian13:latest
+    image: nodejs26-debian13
+
+  # Templates — uncomment when needed.
+  # - source: docker.io/library/nginx:latest
+  #   image: nginx
+  # - source: quay.io/prometheus/node-exporter:v1.8.2
+  #   image: node-exporter
+  # - source: ghcr.io/your-org/your-app:1.4.0
+  #   image: your-app

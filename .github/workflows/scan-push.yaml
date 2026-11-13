@@ -1,0 +1,281 @@
+name: scan and push
+
+# Read .github/images.yaml, copy each source image into an OCI layout, scan it
+# with Trivy, then publish the layout to the R2-backed OCI registry using the
+# reusable composite action in .github/actions/push-to-r2.
+#
+# Manual only: there is no schedule. Use the `only` input to smoke-test a
+# single target image (e.g. "alpine").
+#
+# Required repository configuration (Settings -> Secrets and variables -> Actions):
+#   Secrets: R2_AWS_ACCESS_KEY_ID, R2_AWS_SECRET_ACCESS_KEY, R2_BUCKET, R2_ENDPOINT
+#
+# Each job fails before pushing when Trivy reports findings at or above the
+# configured severity, unless fail-on-findings is set to false.
+
+on:
+  workflow_dispatch:
+    inputs:
+      only:
+        description: Only process this target image name (empty = every entry)
+        type: string
+        default: ""
+      severity:
+        description: Comma-separated Trivy severities that gate the push
+        type: string
+        default: CRITICAL,HIGH
+      fail-on-findings:
+        description: Fail before pushing when matching vulnerabilities are found
+        type: choice
+        options:
+          - "true"
+          - "false"
+        default: "true"
+
+permissions:
+  contents: read
+  security-events: write
+
+jobs:
+  prepare:
+    name: build matrix
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.matrix.outputs.matrix }}
+      count: ${{ steps.matrix.outputs.count }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Build image matrix
+        id: matrix
+        env:
+          ONLY: ${{ inputs.only }}
+          CONFIG: .github/images.yaml
+        run: |
+          set -euo pipefail
+          ruby <<'RUBY'
+          require "yaml"
+          require "json"
+
+          config_path = ENV.fetch("CONFIG")
+          only = ENV.fetch("ONLY", "")
+
+          unless File.file?(config_path)
+            warn "::error::missing #{config_path}"
+            exit 1
+          end
+
+          begin
+            doc = YAML.load_file(config_path)
+          rescue StandardError => e
+            warn "::error::invalid YAML in #{config_path}: #{e.message}"
+            exit 1
+          end
+
+          images = doc.is_a?(Hash) ? doc["images"] : nil
+          unless images.is_a?(Array) && !images.empty?
+            warn "::error::#{config_path} must contain a non-empty \"images\" list"
+            exit 1
+          end
+
+          errors = []
+          entries = []
+
+          images.each_with_index do |entry, index|
+            unless entry.is_a?(Hash)
+              errors << "images[#{index}]: must be a mapping"
+              next
+            end
+
+            source = entry["source"]
+            image = entry["image"]
+            tag = entry["tag"]
+
+            unless source.is_a?(String) && !source.empty?
+              errors << "images[#{index}]: \"source\" is required"
+              source = nil
+            end
+
+            if source&.include?("://")
+              errors << "images[#{index}]: \"source\" must not include a transport prefix (#{source})"
+              source = nil
+            end
+
+            unless image.is_a?(String) && !image.empty?
+              errors << "images[#{index}]: \"image\" is required"
+              image = nil
+            end
+
+            if image && image !~ /\A[a-z0-9]+([._\/-][a-z0-9]+)*\z/
+              errors << "images[#{index}]: \"image\" must be lowercase and registry-safe (#{image})"
+              image = nil
+            end
+
+            if !tag.nil? && !tag.is_a?(String)
+              errors << "images[#{index}]: \"tag\" must be a string"
+              tag = nil
+            end
+
+            if (tag.nil? || tag.empty?) && source
+              if source.include?("@")
+                tag = nil
+              else
+                last = source.split("/").last.to_s
+                tag = last.include?(":") ? last.split(":").last : nil
+              end
+            end
+
+            if source && (tag.nil? || tag.empty?)
+              errors << "images[#{index}]: no tag in \"source\" and no \"tag\" set (#{source})"
+              tag = nil
+            end
+
+            next unless source && image && tag
+
+            entries << {
+              "source" => source,
+              "image" => image,
+              "tag" => tag,
+              "slug" => image.gsub(/[^a-z0-9]+/, "-").gsub(/\A-+|-+\z/, ""),
+              "oci_dir" => "./tmp/" + image.gsub("/", "-")
+            }
+          end
+
+          unless errors.empty?
+            errors.each { |error| warn "::error::#{error}" }
+            exit 1
+          end
+
+          entries.select! { |entry| only.empty? || entry["image"] == only }
+          if entries.empty?
+            warn "::error::no images matched only=#{only.inspect}"
+            exit 1
+          end
+
+          duplicates = entries.group_by { |entry| "#{entry["image"]}:#{entry["tag"]}" }.select { |_, group| group.length > 1 }.keys
+          unless duplicates.empty?
+            warn "::error::duplicate target image:tag entries: #{duplicates.join(", ")}"
+            exit 1
+          end
+
+          puts "Prepared #{entries.length} image(s):"
+          entries.each { |entry| puts "  - #{entry["source"]} -> #{entry["image"]}:#{entry["tag"]}" }
+
+          File.open(ENV.fetch("GITHUB_OUTPUT"), "a") do |file|
+            file.puts "matrix=#{JSON.generate(entries)}"
+            file.puts "count=#{entries.length}"
+          end
+          RUBY
+
+  scan-push:
+    name: ${{ matrix.image }}:${{ matrix.tag }}
+    needs: prepare
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    concurrency:
+      group: scan-push-${{ matrix.slug }}
+      cancel-in-progress: false
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.prepare.outputs.matrix) }}
+    env:
+      IMAGE_NAME: ${{ matrix.image }}
+      TAG: ${{ matrix.tag }}
+      OCI_DIR: ${{ matrix.oci_dir }}
+      MULTI_ARCH: all
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Install skopeo and jq
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y skopeo jq
+          skopeo --version
+          jq --version
+
+          # copy-and-push-r2.sh shells out to `nix-shell -p skopeo --run "<cmd>"`.
+          # Ubuntu runners are not Nix-based, so provide a minimal shim that
+          # executes the command with the apt-installed skopeo instead.
+          sudo tee /usr/local/bin/nix-shell >/dev/null <<'SHIM'
+          #!/usr/bin/env bash
+          set -euo pipefail
+          while [[ $# -gt 0 ]]; do
+            case "$1" in
+              --run)
+                shift
+                exec bash -c "$1"
+                ;;
+              *) shift ;;
+            esac
+          done
+          echo "nix-shell shim: no --run argument supplied" >&2
+          exit 1
+          SHIM
+          sudo chmod +x /usr/local/bin/nix-shell
+
+      - name: Copy image to OCI layout
+        env:
+          COPY_ONLY: "1"
+          SOURCE_IMAGE: docker://${{ matrix.source }}
+          SRC_NO_CREDS: "1"
+        run: ./copy-and-push-r2.sh
+
+      - name: Scan image with Trivy
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          image-ref: ${{ matrix.source }}
+          format: sarif
+          output: trivy-results.sarif
+          severity: ${{ inputs.severity || 'CRITICAL,HIGH' }}
+          vuln-type: os,library
+          ignore-unfixed: true
+          exit-code: ${{ inputs.fail-on-findings == 'false' && '0' || '1' }}
+
+      - name: Upload Trivy SARIF
+        if: always()
+        continue-on-error: true
+        uses: github/codeql-action/upload-sarif@v4
+        with:
+          sarif_file: trivy-results.sarif
+          category: trivy-${{ matrix.slug }}
+
+      - name: Upload Trivy report
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: trivy-${{ matrix.slug }}
+          path: trivy-results.sarif
+          if-no-files-found: ignore
+
+      - name: Verify R2 configuration
+        env:
+          R2_BUCKET: ${{ secrets.R2_BUCKET }}
+          R2_ENDPOINT: ${{ secrets.R2_ENDPOINT }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_AWS_SECRET_ACCESS_KEY }}
+        run: |
+          missing=0
+          for name in R2_BUCKET R2_ENDPOINT AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY; do
+            if [[ -z "${!name:-}" ]]; then
+              echo "::error::${name} is not configured (see .github/actions/push-to-r2/README.md)"
+              missing=1
+            fi
+          done
+          exit "${missing}"
+
+      - name: Push OCI layout to R2
+        uses: ./.github/actions/push-to-r2
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_AWS_SECRET_ACCESS_KEY }}
+        with:
+          image-name: ${{ matrix.image }}
+          oci-dir: ${{ matrix.oci_dir }}
+          r2-bucket: ${{ secrets.R2_BUCKET }}
+          r2-endpoint: ${{ secrets.R2_ENDPOINT }}
+          tags: ${{ matrix.tag }}
+          aws-region: auto
