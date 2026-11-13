@@ -1,8 +1,8 @@
 # skopeo → R2 pipeline
 
-Pipeline untuk menyalin container image dari registry manapun ke **Cloudflare R2** dengan format OCI layout, dan menyajikannya kembali sebagai OCI/Docker registry via **Cloudflare Worker**.
+Pipeline for copying container images from any registry into **Cloudflare R2** as an OCI layout, then serving them back as an OCI/Docker registry via a **Cloudflare Worker**.
 
-## Arsitektur
+## Architecture
 
 ```
 [Source Registry]                        [Cloudflare R2]                  [Client]
@@ -16,42 +16,43 @@ Pipeline untuk menyalin container image dari registry manapun ke **Cloudflare R2
         └─────────────────┘                                  └──────────────────┘
               ▲                                                       │
               │                                                       ▼
-        [OCI layout lokal]                                  GET/HEAD /v2/...
+        [local OCI layout]                                      GET/HEAD /v2/...
         tmp/<image>/
           index.json
           oci-layout
           blobs/sha256/...
 ```
 
-## Prasyarat
+## Prerequisites
 
-| Tool | Cara install di repo ini |
+| Tool | How to install it in this repo |
 |---|---|
-| `nix-shell` + `skopeo` | otomatis via `nix-shell -p skopeo` (sudah di-handle script) |
-| `aws-cli` v2 | sudah terinstall di `~/.nix-profile/bin/aws` |
-| `jq` | untuk parsing OCI index.json |
-| `colima` (opsional) | hanya kalau mau load image ke docker daemon lokal |
+| `nix-shell` + `skopeo` | automatically via `nix-shell -p skopeo` (handled by the script) |
+| `aws-cli` v2 | already installed at `~/.nix-profile/bin/aws` |
+| `jq` | for parsing the OCI index.json |
+| `colima` (optional) | only if you want to load images into the local docker daemon |
 
-Cek dengan:
+Check with:
 ```bash
 nix-shell --version && aws --version && jq --version
 ```
 
-## File di repo ini
+## Files in this repo
 
-| File | Fungsi |
+| File | Purpose |
 |---|---|
-| `copy-and-push-r2.sh` | Script utama: copy image via skopeo + push ke R2 |
-| `worker.js` | Cloudflare Worker: serve R2 sebagai OCI/Docker registry (patched, multi-arch compatible) |
-| `.github/actions/push-to-r2/` | Composite GitHub Action untuk mode `PUSH_ONLY` (reusable dari repo lain) |
-| `test/` | Unit test bats untuk `copy-and-push-r2.sh` (offline: `nix-shell` + `aws` di-stub) |
-| `Makefile` | `make test` untuk menjalankan suite |
-| `.github/workflows/nginx-scan-push.yaml` | Pipeline nginx: copy → Trivy scan → push R2 |
-| `sample/` | Contoh OCI layout `nginx:alpine` (linux/arm64, single-arch manifest) |
+| `copy-and-push-r2.sh` | Main script: copy the image via skopeo + push to R2 |
+| `worker.js` | Cloudflare Worker: serves R2 as an OCI/Docker registry (patched, multi-arch compatible) |
+| `.github/actions/push-to-r2/` | Composite GitHub Action for `PUSH_ONLY` mode (reusable from other repos) |
+| `test/` | bats unit tests for `copy-and-push-r2.sh` (offline: `nix-shell` and `aws` are stubbed) |
+| `Makefile` | `make test` to run the suite |
+| `.github/images.yaml` | List of source images to copy, scan, and push |
+| `.github/workflows/scan-push.yaml` | Manual pipeline (no schedule): copy → Trivy scan → push R2 per image |
+| `sample/` | Sample OCI layout for `nginx:alpine` (linux/arm64, single-arch manifest) |
 
 ## Quick start
 
-### 1. Copy + push single tag
+### 1. Copy + push a single tag
 ```bash
 AWS_ACCESS_KEY_ID=xxx AWS_SECRET_ACCESS_KEY=yyy \
 R2_BUCKET=my-bucket \
@@ -60,7 +61,7 @@ IMAGE_NAME=nginx TAG=latest \
 ./copy-and-push-r2.sh
 ```
 
-### 2. Copy + push multi tag sekaligus
+### 2. Copy + push multiple tags at once
 ```bash
 AWS_ACCESS_KEY_ID=xxx AWS_SECRET_ACCESS_KEY=yyy \
 R2_BUCKET=my-bucket \
@@ -69,13 +70,13 @@ IMAGE_NAME=nginx SOURCE_TAGS="1.25 1.26 latest" \
 ./copy-and-push-r2.sh
 ```
 
-### 3. Copy saja (tanpa R2 creds)
+### 3. Copy only (no R2 creds)
 ```bash
 COPY_ONLY=1 IMAGE_NAME=nginx SOURCE_TAGS="1.25 1.26 latest" \
 OCI_DIR=./multi ./copy-and-push-r2.sh
 ```
 
-### 4. Push saja dari layout existing
+### 4. Push only from an existing layout
 ```bash
 AWS_ACCESS_KEY_ID=xxx AWS_SECRET_ACCESS_KEY=yyy \
 R2_BUCKET=my-bucket \
@@ -84,8 +85,8 @@ PUSH_ONLY=1 OCI_DIR=./multi IMAGE_NAME=nginx \
 ./copy-and-push-r2.sh
 ```
 
-### 5. Copy dari private registry (fly.io, GCR, ECR, dll)
-Pastikan sudah login (`flyctl auth docker`, `docker login`, dll) sehingga token tersimpan di `~/.docker/config.json`. Lalu set `SRC_NO_CREDS=0`:
+### 5. Copy from a private registry (fly.io, GCR, ECR, etc.)
+Make sure you are logged in (`flyctl auth docker`, `docker login`, etc.) so the token is stored in `~/.docker/config.json`. Then set `SRC_NO_CREDS=0`:
 ```bash
 SRC_NO_CREDS=0 COPY_ONLY=1 \
 SOURCE_IMAGE=docker://registry.fly.io/myapp:tag \
@@ -93,78 +94,78 @@ IMAGE_NAME=myapp TAG=tag OCI_DIR=./tmp-myapp \
 ./copy-and-push-r2.sh
 ```
 
-## Unit test
+## Unit tests
 
-Script diuji dengan [bats-core](https://github.com/bats-core/bats-core) secara offline: `nix-shell` dan `aws` diganti stub, dan layout OCI dibuat sebagai fixture. Tidak butuh skopeo, network, atau kredensial R2.
+The script is tested with [bats-core](https://github.com/bats-core/bats-core) offline: `nix-shell` and `aws` are replaced by stubs, and an OCI layout is created as a fixture. No skopeo, network, or R2 credentials are required.
 
 ```bash
-make test          # jalankan semua test
-make test-verbose  # tampilkan output test yang lulus
+make test          # run all tests
+make test-verbose  # show passing test output
 ```
 
-Prasyarat: `bats` dan `jq`.
+Prerequisites: `bats` and `jq`.
 
 ```bash
 brew install bats-core jq          # macOS
 sudo apt-get install -y bats jq    # Debian/Ubuntu
 ```
 
-Cakupan: validasi env, penyusunan flag skopeo, mapping `detect_ct()`, upload tag/digest + dedup, override `PUSH_TAGS`, dan semua error path layout OCI. CI menjalankannya di `.github/workflows/test.yaml` (Ubuntu + macOS).
+Coverage: env validation, skopeo flag assembly, `detect_ct()` mapping, tag/digest upload + dedup, `PUSH_TAGS` override, and every OCI layout error path. CI runs it in `.github/workflows/test.yaml` (Ubuntu + macOS).
 
-## Mode operasi
+## Operation modes
 
 | Mode | Flag | skopeo copy | R2 push | AWS creds |
 |---|---|---|---|---|
-| Copy + push | (default) | ✅ | ✅ | wajib |
-| Copy only | `COPY_ONLY=1` | ✅ | ❌ | tidak |
-| Push only | `PUSH_ONLY=1` | ❌ | ✅ | wajib |
+| Copy + push | (default) | ✅ | ✅ | required |
+| Copy only | `COPY_ONLY=1` | ✅ | ❌ | not needed |
+| Push only | `PUSH_ONLY=1` | ❌ | ✅ | required |
 
-Aturan:
-- `COPY_ONLY` dan `PUSH_ONLY` mutually exclusive.
-- `SOURCE_TAGS` dan (`TAG` / `SOURCE_IMAGE`) mutually exclusive.
-- Tanpa `SOURCE_TAGS` & tanpa `PUSH_ONLY` → `TAG` wajib (mode single-tag).
+Rules:
+- `COPY_ONLY` and `PUSH_ONLY` are mutually exclusive.
+- `SOURCE_TAGS` and (`TAG` / `SOURCE_IMAGE`) are mutually exclusive.
+- Without `SOURCE_TAGS` and without `PUSH_ONLY` → `TAG` is required (single-tag mode).
 
 ## Environment variables
 
 ### Required (unless `COPY_ONLY=1`)
-| Var | Keterangan |
+| Var | Description |
 |---|---|
 | `AWS_ACCESS_KEY_ID` | R2 access key |
 | `AWS_SECRET_ACCESS_KEY` | R2 secret key |
-| `R2_BUCKET` | nama R2 bucket |
+| `R2_BUCKET` | R2 bucket name |
 | `R2_ENDPOINT` | R2 S3 endpoint URL (`https://<account_id>.r2.cloudflarestorage.com`) |
 
 ### Required (mode-dependent)
-| Var | Keterangan |
+| Var | Description |
 |---|---|
-| `IMAGE_NAME` | nama image di registry target (mis. `nginx`, `pneuma-backend`) |
-| `TAG` | tag tunggal (wajib kecuali pakai `SOURCE_TAGS` atau `PUSH_ONLY`) |
-| `SOURCE_TAGS` | daftar tag dipisah spasi (mis. `"1.25 1.26 latest"`) |
+| `IMAGE_NAME` | image name in the target registry (e.g. `nginx`, `pneuma-backend`) |
+| `TAG` | single tag (required unless using `SOURCE_TAGS` or `PUSH_ONLY`) |
+| `SOURCE_TAGS` | space-separated list of tags (e.g. `"1.25 1.26 latest"`) |
 
 ### Optional
-| Var | Default | Keterangan |
+| Var | Default | Description |
 |---|---|---|
-| `SOURCE_IMAGE` | `docker://<IMAGE_NAME>:<TAG>` | source image lengkap dengan transport |
-| `OCI_DIR` | `./tmp/<IMAGE_NAME>` | folder OCI layout lokal |
-| `MULTI_ARCH` | `all` | nilai `skopeo --multi-arch` (`all` / `system` / `copy`) |
-| `ARCH` | (kosong) | pin arch (`amd64` / `arm64`), override `MULTI_ARCH` |
-| `OS` | `linux` | override OS source |
-| `SRC_NO_CREDS` | `1` | set `0` untuk pakai auth dari `~/.docker/config.json` (private registry seperti fly.io/GCR/ECR) |
+| `SOURCE_IMAGE` | `docker://<IMAGE_NAME>:<TAG>` | full source image including the transport |
+| `OCI_DIR` | `./tmp/<IMAGE_NAME>` | local OCI layout folder |
+| `MULTI_ARCH` | `all` | `skopeo --multi-arch` value (`all` / `system` / `copy`) |
+| `ARCH` | (empty) | pin arch (`amd64` / `arm64`), overrides `MULTI_ARCH` |
+| `OS` | `linux` | override the source OS |
+| `SRC_NO_CREDS` | `1` | set `0` to use auth from `~/.docker/config.json` (private registries like fly.io/GCR/ECR) |
 | `AWS_DEFAULT_REGION` | `auto` | region |
 
-## Workflow multi-version (rekomendasi)
+## Multi-version workflow (recommended)
 
-Pisahkan copy dan push supaya banding source registry hanya sekali pakai, lalu push semua versi sekaligus:
+Separate copy and push so the source registry is hit only once, then push all versions at once:
 
 ```bash
-# Phase 1: pull 3 versi ke satu folder OCI (dedup blob otomatis)
+# Phase 1: pull 3 versions into one OCI folder (blobs dedup automatically)
 COPY_ONLY=1 \
   IMAGE_NAME=nginx \
   SOURCE_TAGS="1.25-alpine 1.26-alpine latest" \
   OCI_DIR=./multi-nginx \
   ./copy-and-push-r2.sh
 
-# Phase 2: push semua tag + digest ke R2 (blob sekali sync)
+# Phase 2: push all tags + digests to R2 (blobs synced once)
 AWS_ACCESS_KEY_ID=xxx AWS_SECRET_ACCESS_KEY=yyy \
   R2_BUCKET=my-bucket \
   R2_ENDPOINT=https://<account_id>.r2.cloudflarestorage.com \
@@ -174,9 +175,9 @@ AWS_ACCESS_KEY_ID=xxx AWS_SECRET_ACCESS_KEY=yyy \
   ./copy-and-push-r2.sh
 ```
 
-Hasilnya di R2:
+Result in R2:
 ```
-v2/nginx/blobs/sha256/...                  # semua blob (config, layer, manifest)
+v2/nginx/blobs/sha256/...                  # all blobs (config, layer, manifest)
 v2/nginx/manifests/1.25-alpine             # tag → manifest file
 v2/nginx/manifests/1.26-alpine
 v2/nginx/manifests/latest
@@ -185,11 +186,11 @@ v2/nginx/manifests/sha256:<digest-2>
 v2/nginx/oci-layout
 ```
 
-Dedup: bila dua tag menunjuk ke manifest yang sama (mis. `latest` dan `1.26-alpine` adalah image identik), tag tetap di-upload sebagai 2 key, tetapi manifest by digest hanya di-upload 1x.
+Dedup: when two tags point to the same manifest (e.g. `latest` and `1.26-alpine` are identical images), both tags are still uploaded as 2 keys, but the manifest by digest is uploaded only once.
 
 ## GitHub Actions (reusable)
 
-Repo ini menyediakan composite action untuk mode `PUSH_ONLY` yang bisa dipakai dari repo manapun:
+This repo provides a composite action for `PUSH_ONLY` mode that can be used from any repo:
 
 ```yaml
 - uses: nipeharefa/skopeo/.github/actions/push-to-r2@v1
@@ -203,18 +204,18 @@ Repo ini menyediakan composite action untuk mode `PUSH_ONLY` yang bisa dipakai d
     r2-endpoint: ${{ vars.R2_ENDPOINT }}
 ```
 
-Caller bertanggung jawab membangun OCI layout (mis. via `docker buildx build --output type=oci,oci-layout=true,dest=./tmp/myapp .`) sebelum memanggil action ini.
+The caller is responsible for building the OCI layout (e.g. via `docker buildx build --output type=oci,oci-layout=true,dest=./tmp/myapp .`) before calling this action.
 
-Detail lengkap (inputs, setup secrets/vars di repo caller, contoh multi-arch, security, pinning): lihat [`.github/actions/push-to-r2/README.md`](.github/actions/push-to-r2/README.md).
+Full details (inputs, setting up secrets/vars in the caller repo, multi-arch example, security, pinning): see [`.github/actions/push-to-r2/README.md`](.github/actions/push-to-r2/README.md).
 
-Setup sekali di repo caller → **Settings → Secrets and variables → Actions**:
+One-time setup in the caller repo → **Settings → Secrets and variables → Actions**:
 
 - **Secrets:** `R2_AWS_ACCESS_KEY_ID`, `R2_AWS_SECRET_ACCESS_KEY`
 - **Variables:** `R2_BUCKET`, `R2_ENDPOINT`
 
-### Sample: build dengan `docker/build-push-action` → R2
+### Sample: build with `docker/build-push-action` → R2
 
-Kalau caller sudah memakai [`docker/build-push-action`](https://github.com/docker/build-push-action), cukup arahkan `outputs` ke OCI layout (bukan push ke registry) lalu teruskan ke composite action `push-to-r2`:
+If the caller already uses [`docker/build-push-action`](https://github.com/docker/build-push-action), just point `outputs` at an OCI layout (instead of pushing to a registry) and pass it to the `push-to-r2` composite action:
 
 ```yaml
 name: build-oci-push-r2
@@ -254,33 +255,57 @@ jobs:
           r2-endpoint: ${{ vars.R2_ENDPOINT }}
 ```
 
-Catatan:
+Notes:
 
-- `outputs: type=oci,oci-layout=true,dest=./tmp/myapp` menghasilkan OCI image layout di folder — **tidak** push ke registry manapun, jadi tidak perlu `push: false` atau creds registry. Nilai `oci-dir` di step berikutnya harus **persis sama** dengan `dest` di sini.
-- `tags: myapp:...` wajib agar annotation `org.opencontainers.image.ref.name` tertulis di `index.json`; tanpa itu tag tidak akan ter-upload ke R2 (lihat troubleshooting action).
-- Multi-arch: tambahkan `platforms: linux/amd64,linux/arm64` — buildx otomatis menghasilkan OCI image **index**, dan `detect_ct()` di script akan memetakan ke `application/vnd.oci.image.index.v1+json`. Worker patched (`worker.js` di repo ini) wajib untuk serve image multi-arch.
-- Cache buildx (opsional): tambahkan `cache-from`/`cache-to` seperti biasa; tidak mempengaruhi output OCI layout.
+- `outputs: type=oci,oci-layout=true,dest=./tmp/myapp` produces an OCI image layout in a folder — it does **not** push to any registry, so `push: false` or registry creds are not needed. The `oci-dir` value in the next step must match `dest` here **exactly**.
+- `tags: myapp:...` is required so the `org.opencontainers.image.ref.name` annotation is written to `index.json`; without it the tag will not be uploaded to R2 (see the action's troubleshooting section).
+- Multi-arch: add `platforms: linux/amd64,linux/arm64` — buildx automatically produces an OCI image **index**, and `detect_ct()` in the script maps it to `application/vnd.oci.image.index.v1+json`. The patched worker (`worker.js` in this repo) is required to serve multi-arch images.
+- buildx cache (optional): add `cache-from`/`cache-to` as usual; it does not affect the OCI layout output.
 
-## Pipeline: nginx → scan → R2
+## Pipeline: YAML → scan → R2
 
-`.github/workflows/nginx-scan-push.yaml` menjalankan alur lengkap untuk nginx:
+`.github/workflows/scan-push.yaml` reads `.github/images.yaml`, then runs the copy → scan → push flow for each entry:
 
-1. `actions/checkout@v7`.
-2. Install `skopeo` + `jq`, lalu salin image ke OCI layout via `copy-and-push-r2.sh` (`COPY_ONLY=1`).
-3. Scan dengan Trivy (`CRITICAL,HIGH`, `ignore-unfixed`). Hasil SARIF di-upload ke code scanning dan sebagai artifact.
-4. Push OCI layout ke R2 via composite action `push-to-r2`.
+1. `prepare`: read `images.yaml` with Ruby's YAML stdlib, validate the entries, and produce a matrix of `{source, image, tag, oci_dir}`.
+2. Per image (matrix, `fail-fast: false`): `actions/checkout@v7`, install `skopeo` + `jq`, then copy the image into an OCI layout via `copy-and-push-r2.sh` (`COPY_ONLY=1`).
+3. Scan with Trivy (`CRITICAL,HIGH`, `ignore-unfixed`). The SARIF result is uploaded to code scanning (category `trivy-<image>`) and as an artifact.
+4. Push the OCI layout to R2 via the `push-to-r2` composite action using the tag from the config.
 
-Trigger: manual (`workflow_dispatch`, dengan input source image, tag, severity, dan `fail-on-findings`) serta nightly `03:00 UTC`. Push dilewati bila Trivy menemukan kerentanan; set `fail-on-findings=false` untuk tetap push.
+Trigger: **manual only** (`workflow_dispatch`); there is no schedule. Inputs:
 
-Butuh secrets/vars yang sama seperti action `push-to-r2`:
+| Input | Default | Purpose |
+|---|---|---|
+| `only` | empty | Process only one target `image` (e.g. `alpine`); empty = all |
+| `severity` | `CRITICAL,HIGH` | Trivy severity that fails the push |
+| `fail-on-findings` | `true` | `false` = push anyway despite findings |
+
+Format of `.github/images.yaml`:
+
+```yaml
+images:
+  - source: mirror.gcr.io/library/alpine:3.21
+    image: alpine
+  - source: gcr.io/distroless/nodejs26-debian13:latest
+    image: nodejs26-debian13
+```
+
+- `source`: full ref including registry and tag (or digest). Any registry pullable through skopeo's `docker://` transport — `docker.io`, `quay.io`, `ghcr.io`, `gcr.io`, `mirror.gcr.io`, etc.
+- `image`: target name in R2 (`v2/<image>/...`). Required, lowercase, registry-safe.
+- `tag`: optional; defaults to the tag in `source`. Required when `source` uses a digest (`@sha256:...`).
+
+Entries with a duplicate `image:tag` are rejected. The push is skipped when Trivy finds vulnerabilities; set `fail-on-findings=false` to push anyway.
+
+For a quick check, run manually with `only: alpine`.
+
+Requires the same secrets as the `push-to-r2` action:
 
 - Secrets: `R2_AWS_ACCESS_KEY_ID`, `R2_AWS_SECRET_ACCESS_KEY`, `R2_BUCKET`, `R2_ENDPOINT`
 
-Catatan: runner Ubuntu tidak punya Nix, jadi workflow membuat shim `nix-shell` kecil yang menjalankan perintah `--run` memakai `skopeo` dari apt.
+Note: the Ubuntu runner does not have Nix, so the workflow creates a small `nix-shell` shim that runs the `--run` command using the apt-installed `skopeo`.
 
-## Struktur key R2
+## R2 key structure
 
-Identik untuk semua mode, supaya kompatibel dengan `worker.js`:
+Identical across all modes, so it stays compatible with `worker.js`:
 
 ```
 v2/<image>/blobs/sha256/<hash>          # blob (config, layers, manifest)
@@ -291,46 +316,46 @@ v2/<image>/oci-layout
 
 ## Worker (`worker.js`)
 
-Worker membaca dari R2 dan menyajikan endpoint OCI Registry v2:
+The worker reads from R2 and serves OCI Registry v2 endpoints:
 - `GET/HEAD /v2/` → ping
-- `GET/HEAD /v2/<image>/manifests/<reference>` → manifest (tag atau digest)
+- `GET/HEAD /v2/<image>/manifests/<reference>` → manifest (tag or digest)
 - `GET/HEAD /v2/<image>/blobs/sha256/<hash>` → blob
 
-### Patch penting (sudah diterapkan di file ini)
+### Important patch (already applied in this file)
 
-Worker asli **hardcode** `Content-Type: application/vnd.oci.image.manifest.v1+json`. Ini rusak untuk image multi-arch (yang manifest-nya berupa OCI image **index**). Patch di file ini menambahkan fungsi:
+The original worker **hardcodes** `Content-Type: application/vnd.oci.image.manifest.v1+json`. This breaks multi-arch images (whose manifest is an OCI image **index**). The patch in this file adds a function:
 
 ```js
 function manifestContentType(mediaType) {
   if (mediaType?.includes('oci.image.index'))              return '...index.v1+json';
   if (mediaType?.includes('docker.distribution.manifest.list')) return '...list.v2+json';
   if (mediaType?.includes('docker.distribution.manifest.v2'))   return '...v2+json';
-  return 'application/vnd.oci.image.manifest.v1+json'; // default = behavior lama
+  return 'application/vnd.oci.image.manifest.v1+json'; // default = old behavior
 }
 ```
 
-Default tetap manifest type → **backward-compatible** dengan image yang sudah ter-deploy. Untuk image multi-arch (output `MULTI_ARCH=all`), worker otomatis serve Content-Type index.
+The default stays the manifest type → **backward-compatible** with already-deployed images. For multi-arch images (`MULTI_ARCH=all` output), the worker automatically serves the index Content-Type.
 
 ### Deploy
 
-`worker.js` di repo ini adalah working copy. Copy ke project Cloudflare Worker asli lalu:
+`worker.js` in this repo is a working copy. Copy it to the original Cloudflare Worker project, then:
 ```bash
 wrangler deploy
 ```
 
-Pastikan `wrangler.toml` punya binding R2:
+Make sure `wrangler.toml` has the R2 binding:
 ```toml
 [[r2_buckets]]
 binding = "OCI_BUCKET"
 bucket_name = "<your-bucket-name>"
 ```
 
-## Pull kembali dari worker
+## Pull back from the worker
 
-Setelah deploy worker, image bisa di-pull via skopeo atau docker:
+After deploying the worker, images can be pulled via skopeo or docker:
 
 ```bash
-# via skopeo (anon, tanpa creds)
+# via skopeo (anonymous, no creds)
 nix-shell -p skopeo --run \
   "skopeo copy --src-no-creds --dest-oci-mediatypes=true \
    docker://<worker-host>/nginx:latest oci:./pull-test:latest"
@@ -339,34 +364,34 @@ nix-shell -p skopeo --run \
 docker pull <worker-host>/nginx:latest
 ```
 
-## Gotcha & batasan
+## Gotchas & limitations
 
-1. **Multi-arch butuh worker patched** — worker asli tidak bisa serve image index dengan benar. Gunakan `worker.js` dari repo ini.
-2. **Auth anon di worker** — worker tidak implement auth. Cocok untuk image publik, **tidak** untuk image privat.
-3. **Range request tidak di-handle** — worker tetap set `Accept-Ranges: bytes` tapi stream full body. Boros bandwith untuk layer besar.
-4. **`MULTI_ARCH=all` di nginx menghasilkan 16 sub-image** → size besar. Untuk hemat bandwith, pertimbangkan `ARCH=amd64` (atau `arm64`) bila target platform sudah jelas.
-5. **PAT Docker Hub yang expired** di `~/.docker/config.json` akan dipakai skopeo secara default. Script pakai `--src-no-creds` untuk bypass. Untuk source privat, hapus `--src-no-creds` atau sediakan auth file sendiri.
-6. **Host darwin** wajib `--override-os linux` (sudah otomatis di script).
+1. **Multi-arch requires the patched worker** — the original worker cannot serve image indexes correctly. Use the `worker.js` from this repo.
+2. **Anonymous auth on the worker** — the worker does not implement auth. Suitable for public images, **not** for private ones.
+3. **Range requests are not handled** — the worker still sets `Accept-Ranges: bytes` but streams the full body. Wasteful bandwidth for large layers.
+4. **`MULTI_ARCH=all` on nginx produces 16 sub-images** → large size. To save bandwidth, consider `ARCH=amd64` (or `arm64`) when the target platform is known.
+5. **An expired Docker Hub PAT** in `~/.docker/config.json` will be used by skopeo by default. The script uses `--src-no-creds` to bypass it. For private sources, remove `--src-no-creds` or provide your own auth file.
+6. **Darwin host** requires `--override-os linux` (already automatic in the script).
 
 ## Troubleshooting
 
-| Error | Penyebab | Solusi |
+| Error | Cause | Fix |
 |---|---|---|
-| `unknown flag: --dest-oci-mediatypes` | skopeo 1.23+ sudah hapus flag itu | script pakai `--format oci` (pengganti) |
-| `incorrect username/password` di Docker Hub | PAT expired di `~/.docker/config.json` | `--src-no-creds` otomatis; atau update PAT |
-| `no image found ... OS "darwin"` | host = macOS | `--override-os linux` otomatis |
-| `choosing an image from manifest list ... no image found for architecture` | source tidak punya binary untuk arch target | set `ARCH=<arch>` yang tersedia di source |
-| `manifest blob not found` | OCI_DIR rusak / tidak lengkap | hapus folder, ulangi copy |
-| aws `AccessDenied` | R2 creds salah / tidak punya akses bucket | cek `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` dan policy bucket |
-| `The Authorization header is malformed` | region salah | set `AWS_DEFAULT_REGION=auto` |
+| `unknown flag: --dest-oci-mediatypes` | skopeo 1.23+ removed that flag | the script uses `--format oci` (replacement) |
+| `incorrect username/password` on Docker Hub | expired PAT in `~/.docker/config.json` | `--src-no-creds` is automatic; or update the PAT |
+| `no image found ... OS "darwin"` | host = macOS | `--override-os linux` is automatic |
+| `choosing an image from manifest list ... no image found for architecture` | source has no binary for the target arch | set `ARCH=<arch>` available in the source |
+| `manifest blob not found` | OCI_DIR is corrupt / incomplete | delete the folder, re-run the copy |
+| aws `AccessDenied` | wrong R2 creds / no bucket access | check `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` and the bucket policy |
+| `The Authorization header is malformed` | wrong region | set `AWS_DEFAULT_REGION=auto` |
 
-## Verifikasi manual
+## Manual verification
 
 ```bash
-# cek struktur R2
+# check the R2 structure
 aws s3 ls s3://${R2_BUCKET}/v2/nginx/ --endpoint-url ${R2_ENDPOINT} --recursive
 
-# cek manifest tertentu
+# check a specific manifest
 aws s3 cp s3://${R2_BUCKET}/v2/nginx/manifests/latest - \
   --endpoint-url ${R2_ENDPOINT} | jq '.mediaType'
 ```
